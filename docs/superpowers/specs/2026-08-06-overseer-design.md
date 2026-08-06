@@ -37,7 +37,7 @@ writing the task list and reviewing the resulting pull requests.
 | Convergence | Codex returns a machine-readable verdict. Blocking = **any** finding (configurable per task). |
 | Task input | `overseer submit tasks.yaml`, plus an add-task box in the dashboard. |
 | Completion | Commit, push branch, open a **draft** PR. Nothing merges without the human. |
-| Agent permissions | Claude runs `--permission-mode bypassPermissions`, unsandboxed, with the worktree as its working directory. Codex reviews with `-s read-only`. |
+| Agent permissions | Claude runs `--permission-mode bypassPermissions` inside a bubblewrap sandbox. Codex reviews with `-s read-only`, also sandboxed. |
 | Architecture | Go daemon driving both CLIs as subprocesses with structured output. |
 
 ### Correction: what the agent's working directory does and does not do
@@ -57,12 +57,8 @@ working at once cannot collide on the same files or branch, and the user's own c
 never the working directory. That was the original motivation for worktrees and it still
 holds. Containment of a misbehaving agent was never actually delivered.
 
-Real containment would need an OS-level sandbox: a container per task, `bwrap` with
-bind-mounts, or `systemd-run --user` with `ProtectHome` and `ReadOnlyPaths`. That was
-offered during brainstorming and declined as too much plumbing, on the understanding that
-the cheaper option bought most of the safety. It did not. The decision stands as recorded,
-with the honest caveat: run overseer as a user whose reach you are willing to hand to an
-unattended agent.
+Real containment needs an OS-level sandbox. **This has since been added** — see the
+Sandbox section below — so the caveat above applies only when `sandbox: off`.
 
 ### Rejected alternatives
 
@@ -376,13 +372,53 @@ ping-ponging.
   against a throwaway repository, running both loops for real. The PR step sits behind an
   interface so the test asserts the invocation instead of contacting GitHub.
 
+## Sandbox
+
+Both agents run inside a [bubblewrap](https://github.com/containers/bubblewrap) namespace.
+`$HOME` becomes an empty tmpfs and only what the agent needs is mounted back:
+
+| Mount | Access | Why |
+|---|---|---|
+| Task worktree | rw for Claude, **ro** for Codex | The work. The reviewer never writes. |
+| `<repo>/.git` | ro | Objects and refs, so `git log` and `git diff` work. |
+| `<repo>/.git/worktrees/<slug>` | rw for Claude | The worktree's index. Without it `git status` fails. |
+| Agent state dir (`~/.claude`, `~/.codex`) | rw | Session persistence, so `--resume` works. |
+| Agent config + plugins | **ro** | A writable config lets the agent plant a hook that runs on the next *unsandboxed* invocation. That is an escape, not a sandbox. |
+| Agent binary directories | ro | Both CLIs install as symlinks into versioned directories under `$HOME`. |
+| `<runs>/<slug>` | rw | Codex writes `--output-last-message` itself. |
+| Verdict schema file | ro | Codex reads `--output-schema` itself. |
+| `/usr`, `/etc`, `/run/systemd/resolve` | ro | The system, and DNS. |
+
+Everything else is absent: other repositories, dotfiles, `~/.ssh`, and overseer's own
+database. The data directory is never mounted whole, only the current task's run
+directory, so an agent cannot rewrite task state.
+
+Three constraints were found by running real agents inside candidate profiles rather than
+by reasoning about them:
+
+- `/etc/resolv.conf` symlinks into `/run`, so a `/run` tmpfs breaks DNS and every API call
+  with it. `/run/systemd/resolve` must be re-exposed.
+- Codex reads the schema and writes the last-message file itself, so both paths need
+  mounts; a missing schema mount fails the run outright.
+- Writes to unmounted paths beneath a tmpfs parent silently succeed and are discarded.
+  Real data is safe, but an agent may report having written a file that does not exist.
+
+Network is deliberately **not** unshared: the agents call an HTTPS API. The sandbox
+constrains what an agent can read and write, not what it can transmit.
+
+`sandbox` accepts `auto` (default — use bubblewrap where it works, warn loudly where it
+does not), `bwrap` (require it; fail to start otherwise), and `off`. Mode selection probes
+by actually creating a namespace, because bubblewrap's presence does not imply it can run:
+unprivileged user namespaces can be disabled by sysctl, and on Ubuntu an AppArmor profile
+governs bubblewrap's access to them. When a run is unsandboxed the board says so on every
+page.
+
 ## Out of scope
 
 - Merging. Draft PRs only.
-- Sandboxing the executing agent. See the correction under Decisions: this means the agent
-  is unconfined, not that it is confined by the worktree. Adding a sandbox is the single
-  most valuable follow-up if overseer is ever pointed at a machine holding credentials
-  worth protecting.
+- Restricting agent network access. The sandbox is a filesystem boundary only.
+- Per-task containers or VMs. Bubblewrap covers the filesystem exposure that mattered;
+  a container would mainly add image and credential plumbing.
 - Linear or other issue-tracker ingestion.
 - Multi-machine or remote execution.
 - Any reviewer other than Codex.
