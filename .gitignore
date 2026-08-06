@@ -1,0 +1,4 @@
+.overseer/
+overseer
+*.sqlite
+*.sqlite-*
