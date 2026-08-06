@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"019fd8cb-1c27-7700-baa4-e707358d0330"}
+{"type":"turn.started"}
+{"type":"error","message":"{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_json_schema\",\n    \"message\": \"Invalid schema for response_format 'codex_output_schema': In context=('properties', 'findings', 'items'), 'required' is required to be supplied and to be an array including every key in properties. Missing 'file'.\"\n  },\n  \"status\": 400\n}"}
+{"type":"turn.failed","error":{"message":"invalid_json_schema"}}
