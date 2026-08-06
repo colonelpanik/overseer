@@ -37,8 +37,32 @@ writing the task list and reviewing the resulting pull requests.
 | Convergence | Codex returns a machine-readable verdict. Blocking = **any** finding (configurable per task). |
 | Task input | `overseer submit tasks.yaml`, plus an add-task box in the dashboard. |
 | Completion | Commit, push branch, open a **draft** PR. Nothing merges without the human. |
-| Agent permissions | Claude runs `--permission-mode bypassPermissions` with cwd scoped to the worktree. Codex reviews read-only. |
+| Agent permissions | Claude runs `--permission-mode bypassPermissions`, unsandboxed, with the worktree as its working directory. Codex reviews with `-s read-only`. |
 | Architecture | Go daemon driving both CLIs as subprocesses with structured output. |
+
+### Correction: what the agent's working directory does and does not do
+
+The option this decision was chosen from described the blast radius as "one throwaway
+worktree". That was wrong, and the error is recorded here rather than quietly dropped
+because it may change the decision.
+
+`--permission-mode bypassPermissions` skips the permission system; it does not narrow it.
+Setting the working directory to the worktree and omitting `--add-dir` confines nothing —
+`--add-dir` only extends the allow-list that has already been bypassed. Claude runs with
+the daemon user's full filesystem access and can read or write any absolute path that user
+can, including other repositories, dotfiles, and SSH keys.
+
+What the worktree genuinely provides is **isolation between concurrent tasks**: two agents
+working at once cannot collide on the same files or branch, and the user's own checkout is
+never the working directory. That was the original motivation for worktrees and it still
+holds. Containment of a misbehaving agent was never actually delivered.
+
+Real containment would need an OS-level sandbox: a container per task, `bwrap` with
+bind-mounts, or `systemd-run --user` with `ProtectHome` and `ReadOnlyPaths`. That was
+offered during brainstorming and declined as too much plumbing, on the understanding that
+the cheaper option bought most of the safety. It did not. The decision stands as recorded,
+with the honest caveat: run overseer as a user whose reach you are willing to hand to an
+unattended agent.
 
 ### Rejected alternatives
 
@@ -256,6 +280,13 @@ the branch is kept.
    escalates. Unparseable output is *never* treated as approval — that single mistake
    would silently ship unreviewed code, and it is the most important invariant in the
    system.
+
+   The parser is the safety boundary and validates independently of the CLI's schema
+   enforcement, because that enforcement is exactly what may have failed. It requires
+   `verdict` and `findings` to be *present* — a decoder that maps an absent `findings` to
+   an empty slice would read a truncated response as approval — rejects anything trailing
+   the JSON object, and rejects `changes_requested` carrying an empty `findings` array as
+   self-contradictory rather than converging on it.
 2. **Agent process failure.** Retryable causes (rate limit, network, 5xx) get exponential
    backoff up to 3 attempts and **do not count against the iteration cap**.
    Authentication failure pauses the entire run with a banner, since every task would
@@ -270,9 +301,24 @@ the branch is kept.
 5. **git or gh failure.** The task moves to `failed` with the worktree **preserved** and
    the failing command displayed. Worktrees are removed only on `done`; branches always
    survive.
-6. **Daemon restart.** Steps left in `running` at startup are marked `interrupted` and
-   resumed from the last completed step boundary. Persisted session IDs make resumption
-   safe.
+6. **Daemon restart.** Steps left in `running` at startup are marked `interrupted`, and the
+   task re-dispatches whatever action its state was waiting on rather than assuming that
+   action completed. Persisted session IDs make resumption safe; a resume action reloads
+   its findings from the database, since they were otherwise only held in memory.
+
+   Re-dispatch means every action must tolerate being repeated. Agent turns are naturally
+   safe — a repeated plan turn overwrites `PLAN.md`, a repeated review costs one review.
+   Finishing is the exception, because a task only becomes `done` after `finish` returns:
+   a crash in that window would otherwise re-run `finish` against an already-pushed branch
+   and an already-removed worktree, and fail a task that had in fact succeeded. Two things
+   make the repeat safe: `finish` returns early when the task already records a PR URL, and
+   opening a PR first checks for an existing one on the branch instead of creating a
+   duplicate.
+
+7. **Concurrent tasks.** No per-task state lives on the shared engine. Step records are
+   passed through the call chain rather than parked in a field, or a second task's review
+   could attach its verdict and findings to the first task's step. The concurrency test
+   runs under `-race`.
 
 ## Interfaces
 
@@ -333,8 +379,10 @@ ping-ponging.
 ## Out of scope
 
 - Merging. Draft PRs only.
-- Container or VM isolation per task. The worktree plus bypassed permissions is the
-  agreed blast radius.
+- Sandboxing the executing agent. See the correction under Decisions: this means the agent
+  is unconfined, not that it is confined by the worktree. Adding a sandbox is the single
+  most valuable follow-up if overseer is ever pointed at a machine holding credentials
+  worth protecting.
 - Linear or other issue-tracker ingestion.
 - Multi-machine or remote execution.
 - Any reviewer other than Codex.
