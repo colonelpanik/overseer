@@ -58,9 +58,20 @@ Verified against `codex-cli 0.146.0` and Claude Code `2.1.223`:
 - `claude -p` — headless. `--output-format stream-json` for a JSONL event stream,
   `--resume <session-id>` to continue a session across loop iterations,
   `--permission-mode bypassPermissions`, `--add-dir` (deliberately unused).
+  `--verbose` is mandatory alongside `--output-format stream-json`.
 - `codex exec` — headless. `--json` for JSONL events, `--output-schema <file>` to constrain
-  the final message to a JSON Schema, `-o/--output-last-message <file>` to capture it.
+  the final message to a JSON Schema, `-o/--output-last-message <file>` to capture it,
+  `-s read-only` for the sandbox. **Its stdin must be closed:** `codex exec` appends piped
+  stdin to the prompt and blocks waiting for EOF, so a non-TTY stdin that is never closed
+  hangs the process indefinitely.
 - `gh pr create --draft` for the completion step.
+
+Both event vocabularies were captured from live runs rather than inferred. Claude emits
+`system/init` (carrying `session_id`), `assistant`, `rate_limit_event` and `result`, and
+also relays the user's `SessionStart` hook output as `system/hook_started` and
+`system/hook_response` — parsers must tolerate those. Codex emits `thread.started`
+(carrying `thread_id`), `turn.started`, `item.completed` (only `agent_message` items hold
+the verdict), `turn.completed`, and `error`/`turn.failed`.
 
 `--resume` is the load-bearing flag: it means each Codex review is delivered into the
 *same* Claude session that produced the work, so Claude retains its own context exactly
@@ -163,28 +174,37 @@ Same shape, with one deliberate difference: it starts a **fresh** Claude session
 with `PLAN.md` rather than resuming the planning session. The plan is already the
 distilled intent, and a clean context leaves more room for the implementation work.
 
-Claude commits at the end of each turn. Codex then reviews with
-`--base origin/<default-branch>`, so it sees the real accumulated diff rather than a
-description of it. Reviews feed back via `--resume <exec_session_id>`.
+The overseer commits at the end of each Claude turn, rather than instructing Claude to
+commit. The branch state is then deterministic, and a turn that forgets the instruction
+cannot lose work. Codex reviews with `--base origin/<default-branch>`, so it sees the real
+accumulated diff rather than a description of it. Reviews feed back via
+`--resume <exec_session_id>`.
 
 ### Verdict schema
+
+`--output-schema` is validated in OpenAI **strict** mode: every key in a `properties`
+object must also appear in that object's `required` array. Optional fields are therefore
+expressed as nullable and still listed as required. Omitting `file` from `required`
+returns HTTP 400 `invalid_json_schema` — verified against `codex-cli 0.146.0`.
 
 ```json
 {
   "type": "object",
+  "additionalProperties": false,
   "required": ["verdict", "findings"],
   "properties": {
-    "verdict": { "enum": ["approved", "changes_requested"] },
+    "verdict": { "type": "string", "enum": ["approved", "changes_requested"] },
     "findings": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["severity", "summary"],
+        "additionalProperties": false,
+        "required": ["severity", "summary", "file", "line"],
         "properties": {
-          "severity": { "enum": ["critical", "major", "minor", "nit"] },
-          "file": { "type": "string" },
-          "line": { "type": "integer" },
-          "summary": { "type": "string" }
+          "severity": { "type": "string", "enum": ["critical", "major", "minor", "nit"] },
+          "summary": { "type": "string" },
+          "file": { "type": ["string", "null"] },
+          "line": { "type": ["integer", "null"] }
         }
       }
     }
