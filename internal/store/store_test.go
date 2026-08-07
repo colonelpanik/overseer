@@ -188,3 +188,23 @@ func TestClaimableTasksExcludesTerminalStates(t *testing.T) {
 		t.Fatalf("claimable = %d tasks, want 2 (queued, planning)", len(got))
 	}
 }
+
+func TestBaseRefRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	task, err := s.CreateTask(ctx, Task{Slug: "b", RepoPath: "/r", Goal: "g", State: "queued"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.BaseRef = "origin/main"
+	if err := s.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseRef != "origin/main" {
+		t.Errorf("BaseRef = %q, want origin/main", got.BaseRef)
+	}
+}

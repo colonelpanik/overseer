@@ -206,3 +206,65 @@ func TestFailRunningStepsOnlyTouchesThatTask(t *testing.T) {
 		t.Errorf("another task's step was modified: %q", otherSteps[0].State)
 	}
 }
+
+func TestLastBlockingFindingsReturnsMostRecentReviewOnly(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	task := seedTask(t, s)
+
+	older, err := s.StartStep(ctx, Step{TaskID: task.ID, Phase: "plan", Iteration: 1, Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishStep(ctx, older, []Finding{
+		{Severity: "major", Summary: "old finding", Blocking: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	newer, err := s.StartStep(ctx, Step{TaskID: task.ID, Phase: "plan", Iteration: 2, Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishStep(ctx, newer, []Finding{
+		{Severity: "major", Summary: "current finding", Blocking: true},
+		{Severity: "nit", Summary: "not blocking here", Blocking: false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A review in the other phase must not leak in.
+	other, err := s.StartStep(ctx, Step{TaskID: task.ID, Phase: "exec", Iteration: 1, Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishStep(ctx, other, []Finding{
+		{Severity: "major", Summary: "exec finding", Blocking: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.LastBlockingFindings(ctx, task.ID, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d findings, want 1", len(got))
+	}
+	if got[0].Summary != "current finding" {
+		t.Errorf("Summary = %q, want \"current finding\"", got[0].Summary)
+	}
+}
+
+func TestLastBlockingFindingsEmptyWhenNoReviews(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	task := seedTask(t, s)
+	got, err := s.LastBlockingFindings(ctx, task.ID, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d findings, want 0", len(got))
+	}
+}

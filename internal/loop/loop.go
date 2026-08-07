@@ -241,3 +241,40 @@ func GrantMoreIterations(t Task, n int) Task {
 func isTerminal(s State) bool {
 	return s == StateDone || s == StateFailed || s == StateEscalated
 }
+
+// Pending returns the action a mid-flight task is waiting on, and whether
+// there is one.
+//
+// A restarted daemon cannot know whether the step it was running completed,
+// so it re-dispatches rather than assuming success. Agent steps are safe to
+// repeat: a re-run plan turn overwrites PLAN.md, and a re-run review just
+// costs another review. The caller must reload the findings for a resume
+// action from the store, because they were only ever held in memory.
+func Pending(t Task) (Action, bool) {
+	switch t.State {
+	case StateWorktree:
+		return Action{Kind: ActSetupWorktree}, true
+
+	case StatePlanning:
+		if t.Iteration <= 1 {
+			return Action{Kind: ActClaudePlan}, true
+		}
+		return Action{Kind: ActClaudePlanResume, ResumeSessionID: t.PlanSessionID}, true
+
+	case StatePlanReview:
+		return Action{Kind: ActCodexPlanReview}, true
+
+	case StateExecuting:
+		if t.Iteration <= 1 {
+			return Action{Kind: ActClaudeExec}, true
+		}
+		return Action{Kind: ActClaudeExecResume, ResumeSessionID: t.ExecSessionID}, true
+
+	case StateCodeReview:
+		return Action{Kind: ActCodexCodeReview}, true
+
+	case StateFinishing:
+		return Action{Kind: ActFinish}, true
+	}
+	return Action{Kind: ActNone}, false
+}

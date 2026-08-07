@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -203,6 +204,35 @@ func (s *Store) TaskTotals(ctx context.Context, taskID int64) (Totals, error) {
 	t.InputTokens = int(in.Int64)
 	t.OutputTokens = int(out.Int64)
 	return t, nil
+}
+
+// LastBlockingFindings returns the blocking findings from the most recent
+// review step in the given phase. The engine uses it to rebuild a resume
+// prompt after a restart, since findings are otherwise only held in memory.
+func (s *Store) LastBlockingFindings(ctx context.Context, taskID int64, phase string) ([]Finding, error) {
+	var stepID int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM steps
+		WHERE task_id = ? AND phase = ? AND agent = 'codex' AND state = 'done'
+		ORDER BY id DESC LIMIT 1`, taskID, phase).Scan(&stepID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("last review step: %w", err)
+	}
+
+	all, err := s.ListFindings(ctx, stepID)
+	if err != nil {
+		return nil, err
+	}
+	var blocking []Finding
+	for _, f := range all {
+		if f.Blocking {
+			blocking = append(blocking, f)
+		}
+	}
+	return blocking, nil
 }
 
 // FailRunningSteps closes one task's still-running steps as failed. Used when
