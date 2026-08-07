@@ -45,6 +45,10 @@ type Engine struct {
 	// RetryBackoff is the base delay between retries; tests shorten it.
 	RetryBackoff time.Duration
 
+	// PollInterval is how often Run checks for claimable tasks; tests shorten
+	// it. Zero (the default returned by New) means 2s.
+	PollInterval time.Duration
+
 	// OnChange is called after every persisted state transition, so the web
 	// layer can push an SSE update. It must not block.
 	OnChange func(taskID int64)
@@ -68,6 +72,15 @@ func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.
 	if err != nil {
 		return nil, err
 	}
+	// Created once at startup, not lazily per task: an optional mount is
+	// silently skipped when its source is absent, and a skipped mount here
+	// would mean the cache lives only on the sandbox's ephemeral tmpfs for
+	// that one invocation — technically working, but defeating the point,
+	// since nothing would persist across iterations or tasks.
+	goBuild, goMod := goCacheDirs(cfg.DataDir)
+	if err := sandbox.EnsureDirs(goBuild, goMod); err != nil {
+		return nil, err
+	}
 	return &Engine{
 		Cfg:          cfg,
 		Store:        st,
@@ -79,9 +92,17 @@ func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.
 		Sandbox:      wrapper,
 		SandboxNote:  note,
 		RetryBackoff: 5 * time.Second,
+		PollInterval: 2 * time.Second,
 		running:      map[int64]bool{},
 	}, nil
 }
+
+// maxConsecutiveClaimFailures bounds how many times in a row Run tolerates a
+// ClaimableTasks error before giving up and returning it. A single failure is
+// treated as transient — a momentary disk hiccup must not take the whole
+// daemon down while tasks are mid-turn — but a store that never recovers is a
+// genuine reason to stop rather than spin forever logging the same error.
+const maxConsecutiveClaimFailures = 5
 
 // Pause halts dispatch for every task until Resume is called.
 func (e *Engine) Pause(reason string) {
@@ -123,8 +144,14 @@ func (e *Engine) Recover(ctx context.Context) error {
 func (e *Engine) Run(ctx context.Context) error {
 	sem := make(chan struct{}, max(1, e.Cfg.MaxParallel))
 	var wg sync.WaitGroup
-	ticker := time.NewTicker(2 * time.Second)
+	interval := e.PollInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	consecutiveClaimFailures := 0
 
 	for {
 		if e.PauseReason() != "" {
@@ -138,8 +165,29 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		tasks, err := e.Store.ClaimableTasks(ctx)
 		if err != nil {
-			return err
+			consecutiveClaimFailures++
+			fmt.Fprintf(os.Stderr, "overseer: list claimable tasks (attempt %d/%d): %v\n",
+				consecutiveClaimFailures, maxConsecutiveClaimFailures, err)
+			if consecutiveClaimFailures >= maxConsecutiveClaimFailures {
+				// A genuinely broken store, not a blip: give up, but only
+				// after every task already mid-turn has actually finished.
+				// Returning immediately here — as this used to — raced the
+				// caller's deferred st.Close() against workers still calling
+				// e.Store.SaveTask, which is the exact defect fix wave B
+				// closed one call frame higher, in cmdServe itself.
+				wg.Wait()
+				return fmt.Errorf("list claimable tasks failed %d times in a row, giving up: %w",
+					consecutiveClaimFailures, err)
+			}
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return nil
+			case <-ticker.C:
+			}
+			continue
 		}
+		consecutiveClaimFailures = 0
 		for _, t := range tasks {
 			if !e.claim(t.ID) {
 				continue
@@ -184,6 +232,14 @@ func (e *Engine) release(id int64) {
 	e.mu.Lock()
 	delete(e.running, id)
 	e.mu.Unlock()
+}
+
+// isRunning reports whether a worker goroutine currently owns taskID, i.e.
+// holds an in-memory copy of it inside RunTask between claim and release.
+func (e *Engine) isRunning(id int64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.running[id]
 }
 
 // RunTask drives one task from its current state to a terminal state.
@@ -639,6 +695,12 @@ func (e *Engine) sandboxSpec(task store.Task, agentName string) sandbox.Spec {
 		HomeDir: home,
 		WorkDir: task.WorktreeDir,
 		PathEnv: os.Getenv("PATH"),
+		// See F2: the daemon's own environment must not reach the agent
+		// unattended. AllowedEnv keeps a fixed allowlist plus whatever the
+		// operator opted into via sandbox_env_passthrough; everything else —
+		// GITHUB_TOKEN, AWS_*, and the rest — is left behind by bwrap's
+		// --clearenv.
+		Env: sandbox.AllowedEnv(os.Environ(), e.Cfg.SandboxEnvPassthrough),
 	}
 
 	// The agent binary. Installed as a symlink into a versioned directory
@@ -715,12 +777,31 @@ func (e *Engine) sandboxSpec(task store.Task, agentName string) sandbox.Spec {
 		Add(e.SchemaPath, false).
 		Add(e.runDir(task), true)
 
-	// Toolchain caches. Without these, a $HOME tmpfs hides GOCACHE and
-	// GOMODCACHE, so the agent's own test runs start from a cold cache and
-	// re-download every dependency on every iteration — minutes per turn on a
-	// real repository, and an outright failure for a private module that
-	// needs credentials this sandbox deliberately withholds. They are derived
-	// data, so exposing them writable costs nothing.
+	// The agent's own Go build and module cache — never the operator's real
+	// ~/.cache/go-build and ~/go/pkg/mod (see F8). Go's build cache holds
+	// trusted, reused-verbatim output blobs, so a write smuggled through the
+	// real one would be a persistence channel out of the sandbox: it could
+	// get linked into a later *unsandboxed* build on the operator's machine
+	// without ever being rebuilt from the source that would have shown the
+	// tampering. This directory is overseer's own, under the data directory,
+	// so nothing an agent writes here touches anything of the operator's; it
+	// is shared across the whole run (not per-task) to keep the speed benefit
+	// across iterations, and mounted optional/writable like the other caches
+	// below, since New already called sandbox.EnsureDirs on it once at
+	// startup.
+	goBuild, goMod := e.goCacheDirs()
+	spec = spec.AddOptional(goBuild, true).AddOptional(goMod, true)
+	spec.Env["GOCACHE"] = goBuild
+	spec.Env["GOMODCACHE"] = goMod
+
+	// Other toolchain caches. Without these, a $HOME tmpfs hides them, so the
+	// agent's own test runs start from a cold cache and re-download every
+	// dependency on every iteration — minutes per turn on a real repository,
+	// and an outright failure for a private module that needs credentials
+	// this sandbox deliberately withholds. They are derived data, so exposing
+	// them writable costs nothing — and unlike Go's build cache, they are
+	// integrity-checked on read, which is what makes mounting the operator's
+	// real ones an acceptable risk that mounting ~/.cache/go-build was not.
 	for _, p := range e.Cfg.SandboxCachePaths {
 		spec = spec.AddOptional(os.ExpandEnv(p), true)
 	}
@@ -735,6 +816,19 @@ func (e *Engine) sandboxSpec(task store.Task, agentName string) sandbox.Spec {
 	}
 
 	return spec
+}
+
+// goCacheDirs are overseer's own Go build and module cache directories, under
+// dataDir rather than the operator's real $HOME (see F8). Shared by every
+// task and every iteration of a run, not per-task, so the speed benefit a
+// warm cache provides survives across the whole run.
+func goCacheDirs(dataDir string) (build, mod string) {
+	base := filepath.Join(dataDir, "gocache")
+	return filepath.Join(base, "go-build"), filepath.Join(base, "pkg", "mod")
+}
+
+func (e *Engine) goCacheDirs() (build, mod string) {
+	return goCacheDirs(e.Cfg.DataDir)
 }
 
 // agentStateDir is the per-task directory that stands in for the agent's real

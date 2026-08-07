@@ -273,6 +273,57 @@ func TestSandboxSpecMountsToolchainCaches(t *testing.T) {
 	}
 }
 
+// TestSandboxSpecUsesOverseersOwnGoCachesNotTheOperatorsReal is the direct
+// regression test for Finding F8: the operator's real ~/.cache/go-build and
+// ~/go/pkg/mod must never be mounted writable, since Go's build cache holds
+// trusted output blobs that a later *unsandboxed* build would reuse without
+// full re-verification. GOCACHE/GOMODCACHE must instead point at a directory
+// under overseer's own data dir.
+func TestSandboxSpecUsesOverseersOwnGoCachesNotTheOperatorsReal(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	task := h.submit(t, "go cache is overseer owned")
+	task.WorktreeDir = filepath.Join(t.TempDir(), "wt")
+
+	spec := h.eng.sandboxSpec(task, "claude")
+
+	realGoBuild := filepath.Join(home, ".cache", "go-build")
+	realGoMod := filepath.Join(home, "go", "pkg", "mod")
+	for _, m := range spec.Mounts {
+		if m.Src == realGoBuild || m.Src == realGoMod {
+			t.Errorf("the operator's real Go cache is mounted: %+v", m)
+		}
+	}
+
+	if spec.Env["GOCACHE"] == "" || spec.Env["GOMODCACHE"] == "" {
+		t.Fatalf("GOCACHE/GOMODCACHE not set: %+v", spec.Env)
+	}
+	if !strings.HasPrefix(spec.Env["GOCACHE"], h.eng.Cfg.DataDir) {
+		t.Errorf("GOCACHE = %q, want it under the data dir %q", spec.Env["GOCACHE"], h.eng.Cfg.DataDir)
+	}
+	if !strings.HasPrefix(spec.Env["GOMODCACHE"], h.eng.Cfg.DataDir) {
+		t.Errorf("GOMODCACHE = %q, want it under the data dir %q", spec.Env["GOMODCACHE"], h.eng.Cfg.DataDir)
+	}
+
+	// The overseer-owned cache dirs must actually be mounted (writable), or
+	// pointing GOCACHE/GOMODCACHE at them is pointing into thin air.
+	var mountedBuild, mountedMod bool
+	for _, m := range spec.Mounts {
+		if m.Src == spec.Env["GOCACHE"] {
+			mountedBuild = m.Write
+		}
+		if m.Src == spec.Env["GOMODCACHE"] {
+			mountedMod = m.Write
+		}
+	}
+	if !mountedBuild || !mountedMod {
+		t.Errorf("overseer's own Go cache dirs are not mounted writable: build=%v mod=%v", mountedBuild, mountedMod)
+	}
+}
+
 func TestSandboxSpecDoesNotMountCredentialsByDefault(t *testing.T) {
 	// Mounting ~/.netrc or an SSH agent socket would hand the agent
 	// credentials. Operators can opt in with sandbox_extra_read_only; the
@@ -330,6 +381,66 @@ func TestTaskRunsToCompletionInsideTheSandbox(t *testing.T) {
 	if got.State != string(loop.StateDone) {
 		t.Fatalf("State = %q (err %q), want done; the sandbox broke the loop",
 			got.State, got.ErrMsg)
+	}
+}
+
+// TestSandboxEnvAllowlistIsEnforced is the end-to-end regression test for
+// Finding F2, built against the real sandbox.Bwrap and the actual Spec the
+// engine assembles — not a mock — exactly as the finding's test requirement
+// asks for.
+func TestSandboxEnvAllowlistIsEnforced(t *testing.T) {
+	if err := sandbox.Probe("bwrap"); err != nil {
+		t.Skipf("bwrap unusable: %v", err)
+	}
+
+	t.Setenv("OVERSEER_TEST_OUTSIDE_ALLOWLIST", "should-not-leak")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-allowlisted")
+	t.Setenv("OVERSEER_TEST_PASSTHROUGH_ONLY", "reaches-via-config")
+
+	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	h.eng.Cfg.SandboxEnvPassthrough = []string{"OVERSEER_TEST_PASSTHROUGH_ONLY"}
+
+	ctx := context.Background()
+	task := h.submit(t, "env allowlist check")
+	wt, err := h.eng.WT.Create(ctx, h.repo, task.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.WorktreeDir, task.Branch, task.BaseRef = wt.Dir, wt.Branch, wt.BaseRef
+	task.GitCommonDir, task.GitAdminDir = wt.CommonDir, wt.AdminDir
+
+	// Mirrors what runAgent does before wrapping for real: the required
+	// mounts (run dir, per-task agent state dir) must exist or bubblewrap
+	// aborts outright rather than skipping them.
+	if err := sandbox.EnsureDirs(h.eng.runDir(task)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.prepareAgentState(task, "claude"); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := h.eng.sandboxSpec(task, "claude")
+	wrapper, _, err := sandbox.Select("bwrap", "bwrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, args := wrapper.Wrap("/bin/sh",
+		[]string{"-c", `echo "[$OVERSEER_TEST_OUTSIDE_ALLOWLIST][$ANTHROPIC_API_KEY][$OVERSEER_TEST_PASSTHROUGH_ONLY]"`},
+		spec)
+	out, err := exec.Command(bin, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandboxed echo failed: %v: %s", err, out)
+	}
+	got := string(out)
+
+	if strings.Contains(got, "should-not-leak") {
+		t.Errorf("a variable outside the allowlist reached the sandbox: %q", got)
+	}
+	if !strings.Contains(got, "sk-ant-test-allowlisted") {
+		t.Errorf("an allowlisted credential variable (ANTHROPIC_API_KEY) did not reach the sandbox: %q", got)
+	}
+	if !strings.Contains(got, "reaches-via-config") {
+		t.Errorf("a sandbox_env_passthrough entry was not honoured: %q", got)
 	}
 }
 

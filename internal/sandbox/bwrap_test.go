@@ -129,6 +129,50 @@ func TestBwrapInvertedStateLayeringBlocksPlantedConfig(t *testing.T) {
 	}
 }
 
+// TestBwrapClearsTheDaemonsEnvironment is the direct regression test for
+// Finding F2: without --clearenv, bubblewrap passes its own caller's
+// environment straight through to the sandboxed process, so anything the
+// daemon happens to have — GITHUB_TOKEN, AWS_*, whatever else the operator's
+// shell exports — would reach an agent whose sandbox is supposed to expose
+// only what it explicitly needs.
+func TestBwrapClearsTheDaemonsEnvironment(t *testing.T) {
+	b := requireBwrap(t)
+
+	t.Setenv("OVERSEER_TEST_SECRET", "should-not-leak")
+	spec := Spec{HomeDir: t.TempDir(), WorkDir: "/tmp", PathEnv: "/usr/bin:/bin"}
+
+	out, ok := runIn(t, b, spec, `echo "[$OVERSEER_TEST_SECRET]"`)
+	if !ok {
+		t.Fatalf("script failed: %s", out)
+	}
+	if strings.Contains(out, "should-not-leak") {
+		t.Errorf("the daemon's environment leaked into the sandbox: %q", out)
+	}
+	if !strings.Contains(out, "[]") {
+		t.Errorf("expected an empty (cleared) variable, got %q", out)
+	}
+}
+
+// TestBwrapSetsExplicitEnvFromTheSpec proves the other half: whatever the
+// caller puts in Spec.Env does reach the sandboxed process, via --setenv
+// applied after --clearenv wipes everything else.
+func TestBwrapSetsExplicitEnvFromTheSpec(t *testing.T) {
+	b := requireBwrap(t)
+
+	spec := Spec{
+		HomeDir: t.TempDir(), WorkDir: "/tmp", PathEnv: "/usr/bin:/bin",
+		Env: map[string]string{"ANTHROPIC_API_KEY": "sk-test-123", "GOCACHE": "/some/cache"},
+	}
+
+	out, ok := runIn(t, b, spec, `echo "$ANTHROPIC_API_KEY $GOCACHE"`)
+	if !ok {
+		t.Fatalf("script failed: %s", out)
+	}
+	if !strings.Contains(out, "sk-test-123") || !strings.Contains(out, "/some/cache") {
+		t.Errorf("Spec.Env did not reach the sandbox: %q", out)
+	}
+}
+
 func TestBwrapKeepsNetworkAndDNS(t *testing.T) {
 	b := requireBwrap(t)
 	// The agents call an HTTPS API, and /etc/resolv.conf is a symlink into

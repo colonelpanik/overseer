@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"overseer/internal/loop"
 )
 
 func TestParseBatch(t *testing.T) {
@@ -131,5 +133,60 @@ func TestSubmitRejectsNonRepoPath(t *testing.T) {
 		Repo: t.TempDir(), Goal: "g",
 	}); err == nil {
 		t.Fatal("expected an error for a path that is not a git repository")
+	}
+}
+
+// TestAbandonRefusesATaskAWorkerCurrentlyOwns is the direct regression test
+// for the missing guard on Abandon: without it, the call below would write
+// "failed", but a worker "holding" the task (claim without release, standing
+// in for a goroutine mid-RunTask) would silently overwrite that on its own
+// next SaveTask. The fix must refuse outright, with an error the operator can
+// see, rather than accept the call and let it be clobbered moments later.
+func TestAbandonRefusesATaskAWorkerCurrentlyOwns(t *testing.T) {
+	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "long running task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.eng.claim(task.ID) {
+		t.Fatal("claim failed on a fresh task")
+	}
+	defer h.eng.release(task.ID)
+
+	if err := h.eng.Abandon(ctx, task.ID); err == nil {
+		t.Fatal("Abandon succeeded on a task a worker currently owns")
+	}
+
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State == string(loop.StateFailed) {
+		t.Error("the task's state was changed despite being owned by a worker")
+	}
+}
+
+// TestAbandonStillWorksOnAnIdleTask guards against the guard itself becoming
+// too broad: a task with no worker actively driving it (the common case —
+// escalated, or simply not yet claimed) must still be abandonable.
+func TestAbandonStillWorksOnAnIdleTask(t *testing.T) {
+	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "idle task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.Abandon(ctx, task.ID); err != nil {
+		t.Fatalf("Abandon on an idle task: %v", err)
+	}
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != string(loop.StateFailed) {
+		t.Errorf("State = %q, want failed", got.State)
 	}
 }

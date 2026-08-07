@@ -43,6 +43,13 @@ type Config struct {
 	// default: mounting credentials hands them to the agent.
 	SandboxExtraReadOnly  []string `yaml:"sandbox_extra_read_only"`
 	SandboxExtraReadWrite []string `yaml:"sandbox_extra_read_write"`
+	// SandboxEnvPassthrough names additional environment variables let through
+	// to the sandboxed agent, beyond the fixed allowlist (HOME, PATH, TERM,
+	// LANG/LC_*, and the agents' own ANTHROPIC_*/CLAUDE_*/CODEX_*/
+	// OPENAI_API_KEY credentials). Empty by default: bubblewrap clears the
+	// daemon's environment before the agent runs, and inheritance from there
+	// is opt-in, not opt-out.
+	SandboxEnvPassthrough []string `yaml:"sandbox_env_passthrough"`
 }
 
 // ValidSeverities are the accepted blocking-severity thresholds, loosest first.
@@ -68,9 +75,17 @@ func Default() Config {
 		BwrapBin:         "bwrap",
 		// These cover the common toolchains; a path that does not exist is
 		// skipped, so listing several is harmless.
+		//
+		// The Go build cache and module cache are deliberately NOT here. Go's
+		// build cache holds trusted, reused-verbatim output blobs (full
+		// verification is opt-in behind GODEBUG=gocacheverify=1), so a write an
+		// agent smuggled through the operator's real ~/.cache/go-build would
+		// survive the sandbox and could get linked into a later *unsandboxed*
+		// build on the operator's own machine. The engine gives the agent its
+		// own Go caches under overseer's data directory instead, wired up with
+		// GOCACHE/GOMODCACHE, which keeps the same speed benefit across
+		// iterations of one run without exposing anything of the operator's.
 		SandboxCachePaths: []string{
-			"$HOME/.cache/go-build",
-			"$HOME/go/pkg/mod",
 			"$HOME/.cargo/registry",
 			"$HOME/.npm",
 			"$HOME/.cache/pip",

@@ -90,7 +90,18 @@ iteration 10 would just cost money. The dashboard offers **continue**,
   repositories, your dotfiles, `~/.ssh`, and overseer's own database are simply
   absent. The agent's configuration (`~/.claude/settings.json`, its plugin
   directory, `~/.codex/config.toml`) is mounted read-only, so a sandboxed agent
-  cannot plant a hook that would run on the next unsandboxed invocation.
+  cannot plant a hook that would run on the next unsandboxed invocation. The
+  agent's own Go build and module cache live under overseer's data directory,
+  not `~/.cache/go-build` or `~/go/pkg/mod` — Go's build cache holds trusted
+  output blobs, so a write smuggled through your real one could get linked
+  into a later *unsandboxed* build without ever being rebuilt from source.
+- The sandbox also clears the daemon's own process environment before the
+  agent runs (`--clearenv`), then passes back only `HOME`, `PATH`, `TERM`,
+  `LANG`/`LC_*`, and the agents' own credential variables
+  (`ANTHROPIC_*`/`CLAUDE_*`/`CODEX_*`/`OPENAI_API_KEY`). `GITHUB_TOKEN`,
+  `AWS_*`, and anything else your shell happens to export do not reach the
+  agent. `sandbox_env_passthrough` lets an operator add more when a task
+  genuinely needs it.
 - Network is **not** restricted — the agents call an HTTPS API. The sandbox
   limits what an agent can read and write, not what it can send. Do not point
   overseer at a repository whose contents you would not want an agent to
@@ -107,3 +118,10 @@ iteration 10 would just cost money. The dashboard offers **continue**,
 - If either CLI turns out not to be logged in, the whole run pauses with a
   banner rather than draining the queue — every task would have failed the
   same way. Log in, then press **Resume run**.
+- The dashboard's state-changing routes (queuing a task, continuing or
+  abandoning one, resuming a paused run) reject a cross-site request and a
+  request whose `Host` header does not match `listen_addr`, so a hostile page
+  open in the same browser cannot drive them.
+- `overseer serve` takes an exclusive lock on `<data_dir>/overseer.lock`, so a
+  second daemon against the same data directory fails fast instead of both
+  daemons claiming the same tasks.

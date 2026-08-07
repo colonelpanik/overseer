@@ -268,3 +268,77 @@ func TestLastBlockingFindingsEmptyWhenNoReviews(t *testing.T) {
 		t.Errorf("got %d findings, want 0", len(got))
 	}
 }
+
+// TestLastBlockingFindingsIncludesVerifySteps is the direct regression test
+// for Finding F3: a verify failure is stored with Agent "verify", not
+// "codex", but loop.afterVerify sends the task down the exact same resume
+// path a Codex review does. A query still filtering `agent = 'codex'` would
+// find nothing here and silently return no findings, even though a blocking
+// one exists.
+func TestLastBlockingFindingsIncludesVerifySteps(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	task := seedTask(t, s)
+
+	step, err := s.StartStep(ctx, Step{TaskID: task.ID, Phase: "exec", Iteration: 1, Agent: "verify"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishStep(ctx, step, []Finding{
+		{Severity: "critical", Summary: "`go test` failed", Blocking: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.LastBlockingFindings(ctx, task.ID, "exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d findings, want 1 from the verify step", len(got))
+	}
+	if got[0].Summary != "`go test` failed" {
+		t.Errorf("Summary = %q, want the verify finding", got[0].Summary)
+	}
+}
+
+// TestLastBlockingFindingsSkipsALaterStepWithNoFindingsOfItsOwn covers a
+// second way the naive "just take the latest done step" fix would still lose
+// findings: a plain Claude turn is also recorded as "done" and has no
+// findings of its own. The query must look past it to the last step that
+// actually recorded a blocking finding, not stop at whichever step happens to
+// be most recent.
+func TestLastBlockingFindingsSkipsALaterStepWithNoFindingsOfItsOwn(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	task := seedTask(t, s)
+
+	review, err := s.StartStep(ctx, Step{TaskID: task.ID, Phase: "exec", Iteration: 1, Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishStep(ctx, review, []Finding{
+		{Severity: "major", Summary: "fix the thing", Blocking: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later Claude turn completed (e.g. the daemon crashed right after it
+	// finished, before the review that would normally follow it), but it
+	// carries no findings of its own.
+	claudeStep, err := s.StartStep(ctx, Step{TaskID: task.ID, Phase: "exec", Iteration: 2, Agent: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishStep(ctx, claudeStep, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.LastBlockingFindings(ctx, task.ID, "exec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Summary != "fix the thing" {
+		t.Fatalf("got %+v, want the review's finding, not an empty result from the later Claude step", got)
+	}
+}

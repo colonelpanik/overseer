@@ -1,5 +1,7 @@
 package sandbox
 
+import "sort"
+
 // Bwrap confines commands with bubblewrap.
 type Bwrap struct {
 	Bin string
@@ -16,6 +18,14 @@ func (Bwrap) Name() string { return "bwrap" }
 // filesystem, not exfiltration.
 func (b Bwrap) Wrap(bin string, args []string, spec Spec) (string, []string) {
 	out := []string{
+		// Wipe the daemon's own environment before anything else. Without
+		// this, bubblewrap passes its own environment straight through to the
+		// sandboxed process — GITHUB_TOKEN, AWS_*, and whatever else the
+		// operator's shell exports would all reach the agent despite the
+		// filesystem sandbox around it. Must precede every --setenv below:
+		// bubblewrap applies environment operations in argument order, so a
+		// --clearenv appearing after a --setenv would wipe that variable too.
+		"--clearenv",
 		// A read-only system. /bin, /sbin, /lib and /lib64 are symlinks into
 		// /usr on this distribution layout; --symlink always succeeds, so
 		// this is harmless where they are real directories too.
@@ -59,6 +69,16 @@ func (b Bwrap) Wrap(bin string, args []string, spec Spec) (string, []string) {
 	}
 	if spec.PathEnv != "" {
 		out = append(out, "--setenv", "PATH", spec.PathEnv)
+	}
+	// Sorted for a deterministic argv, which matters for tests asserting on
+	// it and for anyone diffing two runs' invocations.
+	keys := make([]string, 0, len(spec.Env))
+	for k := range spec.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, "--setenv", k, spec.Env[k])
 	}
 	if spec.WorkDir != "" {
 		out = append(out, "--chdir", spec.WorkDir)

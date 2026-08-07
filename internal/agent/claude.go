@@ -23,10 +23,16 @@ type ClaudeOpts struct {
 // --add-dir is not passed, but do not mistake that for confinement.
 // bypassPermissions skips the permission system entirely, and --add-dir only
 // extends that system's allow-list, so omitting it grants nothing and
-// restricts nothing. The process runs as the daemon's user with that user's
-// full filesystem access; the worktree is only its working directory.
-// Confining it would require an OS-level sandbox, which overseer does not
-// currently set up.
+// restricts nothing. Left to itself, the process would run as the daemon's
+// user with that user's full filesystem access; the worktree would be only
+// its working directory. Real confinement comes from the OS-level sandbox in
+// internal/sandbox (see Engine.sandboxSpec), which wraps this argv with
+// bubblewrap before it ever runs — this function only builds the CLI's own
+// flags and knows nothing about that layer. A previous version of this
+// comment claimed overseer did not set up an OS-level sandbox at all; that
+// stopped being true once the sandbox package was added, and the project has
+// already been burned once by a stale containment claim surviving in
+// documentation after the code changed under it.
 func ClaudeArgs(o ClaudeOpts) []string {
 	args := []string{
 		"-p",

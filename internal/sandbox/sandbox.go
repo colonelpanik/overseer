@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Mount is one path exposed inside the sandbox.
@@ -40,6 +41,13 @@ type Spec struct {
 	Mounts []Mount
 	// PathEnv is the PATH the agent sees.
 	PathEnv string
+	// Env is every other environment variable the agent sees, beyond HOME and
+	// PATH which are threaded through the fields above. The wrapper clears
+	// the daemon's own environment before applying this, so a variable absent
+	// here — GITHUB_TOKEN, AWS_*, whatever else the operator's shell happens
+	// to export — never reaches the sandboxed process at all. Build it with
+	// AllowedEnv.
+	Env map[string]string
 }
 
 // Add appends a required mount, returning the updated Spec so calls chain.
@@ -159,6 +167,55 @@ func BinMounts(bin string) []Mount {
 		add(filepath.Dir(target))
 	}
 	return out
+}
+
+// envAllowExact are env var names always passed into the sandbox verbatim,
+// beyond HOME and PATH which the caller threads through Spec's own fields.
+var envAllowExact = []string{"TERM", "LANG", "OPENAI_API_KEY"}
+
+// envAllowPrefixes are name prefixes always passed into the sandbox: the
+// agents' own credential variables, and the LC_* locale family.
+var envAllowPrefixes = []string{"LC_", "ANTHROPIC_", "CLAUDE_", "CODEX_"}
+
+// AllowedEnv returns the subset of environ (each entry formatted "KEY=VALUE",
+// as os.Environ() returns it) that may reach a sandboxed agent: a fixed
+// allowlist, the agents' own credential variables, and whatever the operator
+// added via sandbox_env_passthrough (extra). Everything else — GITHUB_TOKEN,
+// AWS_*, and the rest of the daemon's own environment — is deliberately left
+// out. The design spec claims credentials beyond the agents' own are not
+// exposed to a sandboxed agent; before this, that was true of the filesystem
+// and false of the process environment, since bubblewrap inherits its
+// caller's environment unless told not to. HOME and PATH are excluded here
+// because Spec has its own dedicated fields for them.
+func AllowedEnv(environ []string, extra []string) map[string]string {
+	allow := map[string]bool{}
+	for _, k := range envAllowExact {
+		allow[k] = true
+	}
+	for _, k := range extra {
+		allow[k] = true
+	}
+
+	out := map[string]string{}
+	for _, kv := range environ {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "HOME" || k == "PATH" {
+			continue
+		}
+		if allow[k] || hasAnyPrefix(k, envAllowPrefixes) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // EnsureDirs creates the writable directories a Spec requires, so a first run

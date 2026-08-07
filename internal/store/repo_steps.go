@@ -207,13 +207,29 @@ func (s *Store) TaskTotals(ctx context.Context, taskID int64) (Totals, error) {
 }
 
 // LastBlockingFindings returns the blocking findings from the most recent
-// review step in the given phase. The engine uses it to rebuild a resume
-// prompt after a restart, since findings are otherwise only held in memory.
+// completed step in the given phase that actually recorded any, whatever
+// produced them. The engine uses it to rebuild a resume prompt after a
+// restart, since findings are otherwise only held in memory.
+//
+// This deliberately does not filter by agent. A verify failure is stored with
+// Agent "verify", not "codex", and loop.afterVerify returns the same
+// ActClaudeExecResume a Codex review does; filtering to 'codex' here made
+// those findings invisible to recovery — a restart mid-verify-fix found
+// nothing, fell through to a fresh Claude session that had no idea a test was
+// failing, and burned an iteration to rediscover what the daemon already
+// knew. It also does not simply take the latest 'done' step regardless of
+// content: the step immediately before a crash could be the very Claude turn
+// that was resuming a review, itself done but never reviewed, and that step
+// carries no findings of its own — the EXISTS clause skips straight past it
+// to the last step that actually has some.
 func (s *Store) LastBlockingFindings(ctx context.Context, taskID int64, phase string) ([]Finding, error) {
 	var stepID int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id FROM steps
-		WHERE task_id = ? AND phase = ? AND agent = 'codex' AND state = 'done'
+		SELECT id FROM steps s
+		WHERE s.task_id = ? AND s.phase = ? AND s.state = 'done'
+			AND EXISTS (
+				SELECT 1 FROM findings f WHERE f.step_id = s.id AND f.blocking = 1
+			)
 		ORDER BY id DESC LIMIT 1`, taskID, phase).Scan(&stepID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

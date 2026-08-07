@@ -156,7 +156,26 @@ func (e *Engine) ContinueEscalated(ctx context.Context, taskID int64, extra int)
 }
 
 // Abandon marks a task failed on purpose, keeping its branch and worktree.
+//
+// It refuses a task a worker goroutine currently owns. Without this guard,
+// Abandon would write "failed" here, but the owning worker holds its own
+// now-stale in-memory copy of the task from before this call, and its very
+// next SaveTask — at the end of whatever action it is mid-dispatch on —
+// overwrites this with whatever state its own loop.Next computed, silently
+// reverting the abandon a moment later. Failing loudly is strictly better
+// than that: the operator sees the abandon did not take effect, rather than
+// watching a task that looked stopped quietly resume on its own.
+//
+// This does not make it possible to stop a task that is actually running:
+// the worker keeps going until its current action returns, however long that
+// takes. Doing that needs a cooperative cancellation signal the worker checks
+// between dispatches, which this guard does not add — it only turns a silent
+// failure into an honest one.
 func (e *Engine) Abandon(ctx context.Context, taskID int64) error {
+	if e.isRunning(taskID) {
+		return fmt.Errorf("task %d is currently running; cannot abandon it while a worker is driving it", taskID)
+	}
+
 	task, err := e.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return err

@@ -13,10 +13,16 @@ import (
 	"overseer/internal/store"
 )
 
+// post issues a same-origin POST: httptest.NewRequest defaults Host to
+// "example.com" when the target is a bare path, which requireSameOrigin
+// would reject as a foreign Host, so it is set here to the server's own
+// configured listen address — exactly what a browser actually pointed at
+// the dashboard would send.
 func post(t *testing.T, s *Server, path string, form url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = s.cfg.ListenAddr
 	rec := httptest.NewRecorder()
 	s.routes().ServeHTTP(rec, req)
 	return rec

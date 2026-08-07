@@ -36,6 +36,55 @@ func TestSpecAddPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestAllowedEnvKeepsOnlyTheAllowlistAndExtras(t *testing.T) {
+	environ := []string{
+		"GITHUB_TOKEN=ghp_leak",
+		"AWS_SECRET_ACCESS_KEY=leak",
+		"HOME=/home/operator",
+		"PATH=/usr/bin",
+		"TERM=xterm-256color",
+		"LANG=en_US.UTF-8",
+		"LC_ALL=en_US.UTF-8",
+		"ANTHROPIC_API_KEY=sk-ant",
+		"CLAUDE_CODE_FOO=bar",
+		"CODEX_HOME=/x",
+		"OPENAI_API_KEY=sk-oai",
+		"MY_CUSTOM_PROXY_TOKEN=extra",
+	}
+
+	got := AllowedEnv(environ, []string{"MY_CUSTOM_PROXY_TOKEN"})
+
+	for _, wantAbsent := range []string{"GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "HOME", "PATH"} {
+		if _, ok := got[wantAbsent]; ok {
+			t.Errorf("%s must not reach the sandbox, got %q", wantAbsent, got[wantAbsent])
+		}
+	}
+	for key, want := range map[string]string{
+		"TERM":                  "xterm-256color",
+		"LANG":                  "en_US.UTF-8",
+		"LC_ALL":                "en_US.UTF-8",
+		"ANTHROPIC_API_KEY":     "sk-ant",
+		"CLAUDE_CODE_FOO":       "bar",
+		"CODEX_HOME":            "/x",
+		"OPENAI_API_KEY":        "sk-oai",
+		"MY_CUSTOM_PROXY_TOKEN": "extra",
+	} {
+		if got[key] != want {
+			t.Errorf("AllowedEnv[%s] = %q, want %q", key, got[key], want)
+		}
+	}
+}
+
+func TestAllowedEnvWithNoExtrasStillKeepsTheFixedAllowlist(t *testing.T) {
+	got := AllowedEnv([]string{"TERM=xterm", "SOME_RANDOM_VAR=x"}, nil)
+	if got["TERM"] != "xterm" {
+		t.Errorf("TERM missing from a default allowlist: %+v", got)
+	}
+	if _, ok := got["SOME_RANDOM_VAR"]; ok {
+		t.Error("an arbitrary var leaked in with no passthrough configured")
+	}
+}
+
 func TestBwrapArgvShape(t *testing.T) {
 	spec := Spec{
 		HomeDir: "/home/u",

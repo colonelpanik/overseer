@@ -15,6 +15,7 @@ import (
 
 	"overseer/internal/config"
 	"overseer/internal/engine"
+	"overseer/internal/lock"
 	"overseer/internal/store"
 	"overseer/internal/web"
 	"overseer/internal/worktree"
@@ -106,6 +107,18 @@ func open(cfg config.Config) (*store.Store, *engine.Engine, error) {
 const shutdownGrace = 10 * time.Second
 
 func cmdServe(cfg config.Config) error {
+	// Taken before the store even opens: two daemons sharing one data dir
+	// each run Recover() and sweep the other's live steps to "interrupted",
+	// both claim the same task, and worktree.Create's adopt() then hands the
+	// same in-use worktree to two bypassPermissions agents writing the same
+	// files at once. See internal/lock for why this is flock rather than a
+	// pidfile.
+	lk, err := lock.Acquire(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer lk.Release()
+
 	st, eng, err := open(cfg)
 	if err != nil {
 		return err
