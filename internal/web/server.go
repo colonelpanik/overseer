@@ -59,6 +59,11 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleBoard)
 	mux.HandleFunc("GET /task/{id}", s.handleTask)
+	mux.HandleFunc("GET /events", s.handleEvents)
+	mux.HandleFunc("POST /tasks", s.handleCreateTask)
+	mux.HandleFunc("POST /task/{id}/continue", s.handleContinue)
+	mux.HandleFunc("POST /task/{id}/abandon", s.handleAbandon)
+	mux.HandleFunc("GET /task/{id}/transcript/{stepID}", s.handleTranscript)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok\n"))
 	})

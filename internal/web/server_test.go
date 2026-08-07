@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,6 +40,27 @@ func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	s.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 	return rec
+}
+
+// store2Task returns an escalated task fixture.
+func store2Task() store.Task {
+	return store.Task{
+		Slug: "parked", RepoPath: "/r", Goal: "g", State: "escalated",
+		Phase: "plan", Iteration: 10, MaxIterations: 10,
+		PlanSessionID: "sess-1", WorktreeDir: "/tmp/wt",
+		ErrMsg: "oscillating", BlockingSeverity: "any",
+	}
+}
+
+// initRepo makes a minimal git repo so Submit's validation passes.
+func initRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init", "--initial-branch=main", dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	return dir
 }
 
 func TestBadge(t *testing.T) {
