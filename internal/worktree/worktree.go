@@ -91,13 +91,30 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 	return text, nil
 }
 
-// DefaultBranch reports the repository's default branch, preferring what
-// origin advertises and falling back to the current branch for repos with
-// no remote.
-func DefaultBranch(ctx context.Context, repoPath string) (string, error) {
+// branchProbe is the result of resolving a repository's default branch,
+// together with enough context for Create to tell "no remote configured,
+// this repo is offline by design" apart from "a remote is configured but
+// could not be reached right now". DefaultBranch's plain (string, error)
+// return cannot make that distinction, but Create needs it: silently
+// falling back to the local branch in the second case would run the whole
+// plan/execute loop against a stale or diverged base and only fail much
+// later, at Push.
+type branchProbe struct {
+	name string
+	// hasOrigin is true when the repository has an "origin" remote
+	// configured at all. It says nothing about whether that remote is
+	// currently reachable.
+	hasOrigin bool
+}
+
+// resolveDefaultBranch does the work behind DefaultBranch, additionally
+// reporting whether an "origin" remote is configured.
+func resolveDefaultBranch(ctx context.Context, repoPath string) (branchProbe, error) {
+	hasOrigin := hasRemote(ctx, repoPath, "origin")
+
 	if out, err := git(ctx, repoPath, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
 		if _, branch, ok := strings.Cut(out, "/"); ok && branch != "" {
-			return branch, nil
+			return branchProbe{name: branch, hasOrigin: hasOrigin}, nil
 		}
 	}
 	// origin/HEAD is often unset in a freshly cloned or locally-created
@@ -107,16 +124,43 @@ func DefaultBranch(ctx context.Context, repoPath string) (string, error) {
 			if strings.HasPrefix(line, "ref: refs/heads/") {
 				rest := strings.TrimPrefix(line, "ref: refs/heads/")
 				if name, _, ok := strings.Cut(rest, "\t"); ok {
-					return strings.TrimSpace(name), nil
+					return branchProbe{name: strings.TrimSpace(name), hasOrigin: hasOrigin}, nil
 				}
 			}
 		}
 	}
-	out, err := git(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
+	name, err := git(ctx, repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("determine default branch: %w", err)
+		return branchProbe{}, fmt.Errorf("determine default branch: %w", err)
 	}
-	return out, nil
+	return branchProbe{name: name, hasOrigin: hasOrigin}, nil
+}
+
+// hasRemote reports whether repoPath has a remote configured under name.
+// This is a local, read-only config lookup with no network I/O, so it costs
+// nothing extra even when the remote itself is unreachable.
+func hasRemote(ctx context.Context, repoPath, name string) bool {
+	out, err := git(ctx, repoPath, "remote")
+	if err != nil {
+		return false
+	}
+	for _, n := range strings.Fields(out) {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultBranch reports the repository's default branch, preferring what
+// origin advertises and falling back to the current branch for repos with
+// no remote.
+func DefaultBranch(ctx context.Context, repoPath string) (string, error) {
+	p, err := resolveDefaultBranch(ctx, repoPath)
+	if err != nil {
+		return "", err
+	}
+	return p.name, nil
 }
 
 // Create cuts a fresh branch from the repository's default branch and checks
@@ -138,10 +182,11 @@ func (m *Manager) Create(ctx context.Context, repoPath, slug string) (Worktree, 
 		Branch:   "overseer/" + slug,
 	}
 
-	base, err := DefaultBranch(ctx, repoPath)
+	probe, err := resolveDefaultBranch(ctx, repoPath)
 	if err != nil {
 		return Worktree{}, err
 	}
+	base := probe.name
 
 	// Adopt an existing worktree from an interrupted attempt.
 	if adopted, ok, err := m.adopt(ctx, wt, base); err != nil {
@@ -152,11 +197,17 @@ func (m *Manager) Create(ctx context.Context, repoPath, slug string) (Worktree, 
 
 	baseRef := "origin/" + base
 	if _, err := git(ctx, repoPath, "fetch", "origin", base); err != nil {
-		// A repo with no reachable remote still works; fall back to the
-		// local branch so offline repos are usable.
+		if probe.hasOrigin {
+			// A remote is configured but could not be reached. Falling back
+			// to the local branch here would run the whole plan/execute
+			// loop against a stale or diverged base and only fail much
+			// later, at Push; fail loudly now instead, at the cheapest
+			// possible point.
+			return Worktree{}, fmt.Errorf("fetch origin %s: remote is configured but unreachable: %w", base, err)
+		}
+		// No remote at all is a legitimate offline repository.
 		baseRef = base
-	}
-	if _, err := git(ctx, repoPath, "rev-parse", "--verify", baseRef); err != nil {
+	} else if _, err := git(ctx, repoPath, "rev-parse", "--verify", baseRef); err != nil {
 		baseRef = base
 	}
 	wt.BaseRef = baseRef

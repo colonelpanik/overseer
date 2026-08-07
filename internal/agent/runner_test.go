@@ -132,6 +132,31 @@ func TestRunTimeoutKillsProcessAndReportsRetryable(t *testing.T) {
 	}
 }
 
+func TestRunStreamErrorSurvivesAndIsNotRetryableEvenAfterATimeout(t *testing.T) {
+	// The agent reports a specific, non-retryable failure and then hangs.
+	// The generic timeout classification must not clobber it: doing so
+	// would turn a non-retryable auth failure into something the engine
+	// retries three times for nothing.
+	bin := writeFakeAgent(t, `echo '{"type":"error","message":"not logged in"}'
+sleep 30`)
+	r := NewCodexRunner(bin)
+
+	res, err := r.Run(context.Background(), RunSpec{
+		Args: []string{"x"}, Dir: t.TempDir(),
+		TranscriptPath: filepath.Join(t.TempDir(), "t.jsonl"),
+		Timeout:        300 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ErrMsg != "not logged in" {
+		t.Errorf("ErrMsg = %q, want the stream error to survive the timeout", res.ErrMsg)
+	}
+	if res.Retryable {
+		t.Error("a non-retryable stream error must not become Retryable just because the process later timed out")
+	}
+}
+
 func TestRunClosesStdinSoCodexDoesNotHang(t *testing.T) {
 	// codex exec appends piped stdin to the prompt and waits for EOF. If
 	// the runner leaves stdin open, this read blocks forever.
@@ -235,6 +260,13 @@ func TestIsRetryable(t *testing.T) {
 		"invalid_json_schema",
 		"unknown flag: --nope",
 		"",
+		// Bare digit and short-word markers must not match inside longer
+		// words or numbers: a token count, a version string, a byte count,
+		// and "eof" hiding inside an unrelated word.
+		"invalid_json_schema: expected 500 max tokens field",
+		"unknown flag: --nope (see docs at v1.503.0)",
+		"wrote 3429 bytes to disk before failing schema validation",
+		"schema violation: geoff is not a valid enum value",
 	}
 	for _, m := range fatal {
 		if IsRetryable(m) {

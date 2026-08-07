@@ -98,6 +98,41 @@ func TestCreateMakesIsolatedWorktreeOnNewBranch(t *testing.T) {
 	}
 }
 
+func TestCreateResolvesOriginBaseRefWhenRemoteIsHealthy(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepoWithRemote(t)
+	m := NewManager(t.TempDir())
+
+	wt, err := m.Create(ctx, repo, "healthy-remote")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if wt.BaseRef != "origin/main" {
+		t.Errorf("BaseRef = %q, want origin/main", wt.BaseRef)
+	}
+}
+
+func TestCreateFailsLoudlyWhenTheConfiguredRemoteIsUnreachable(t *testing.T) {
+	// The remote is still configured (git config still has an "origin"
+	// entry), but the repository behind it is gone -- e.g. deleted, or the
+	// host is unreachable. This must not be treated the same as a
+	// legitimately offline repo with no remote at all: silently falling
+	// back to the local branch would let the whole plan/execute loop run
+	// against a stale or diverged base and only fail much later, at Push.
+	ctx := context.Background()
+	repo := newRepoWithRemote(t)
+	m := NewManager(t.TempDir())
+
+	remoteURL := gitRun(t, repo, "remote", "get-url", "origin")
+	if err := os.RemoveAll(remoteURL); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.Create(ctx, repo, "broken-remote"); err == nil {
+		t.Fatal("Create must fail when the configured remote cannot be reached, not silently fall back to the local branch")
+	}
+}
+
 func TestCreateTwiceAdoptsTheExistingWorktree(t *testing.T) {
 	// Recovery re-dispatches worktree setup when the daemon exited after
 	// `git worktree add` but before the paths were persisted. The second call

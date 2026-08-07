@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"strings"
 	"testing"
 
 	"overseer/internal/agent"
@@ -110,6 +111,9 @@ func TestPlanConvergedStartsExecuteAtIterationOne(t *testing.T) {
 	if act.Kind != ActClaudeExec {
 		t.Errorf("Kind = %q, want %q", act.Kind, ActClaudeExec)
 	}
+	if next.State != StateExecuting {
+		t.Errorf("State = %q, want %q; otherwise the engine dispatches ActClaudeExec but the task stays stuck in plan_review", next.State, StateExecuting)
+	}
 	if next.Phase != PhaseExec {
 		t.Errorf("Phase = %q, want %q", next.Phase, PhaseExec)
 	}
@@ -149,6 +153,31 @@ func TestCodeReviewWithFindingsResumesExecSession(t *testing.T) {
 	}
 	if next.Iteration != 3 {
 		t.Errorf("Iteration = %d, want 3", next.Iteration)
+	}
+	if next.State != StateExecuting {
+		t.Errorf("State = %q, want %q", next.State, StateExecuting)
+	}
+}
+
+func TestStateExecutingStoresExecSessionIDNotPlanSessionIDAndRequestsCodeReview(t *testing.T) {
+	// This is the StateExecuting arm of Next's own switch (the transition
+	// taken after an exec/exec-resume action completes), distinct from the
+	// converge() path that first enters StateExecuting from plan review.
+	task := newTask()
+	task.State, task.Phase, task.Iteration = StateExecuting, PhaseExec, 1
+
+	act, next := Next(task, ok("exec-sess"))
+	if act.Kind != ActCodexCodeReview {
+		t.Errorf("Kind = %q, want %q", act.Kind, ActCodexCodeReview)
+	}
+	if next.ExecSessionID != "exec-sess" {
+		t.Errorf("ExecSessionID = %q, want exec-sess", next.ExecSessionID)
+	}
+	if next.PlanSessionID != "" {
+		t.Errorf("PlanSessionID = %q, want empty: the session belongs in ExecSessionID", next.PlanSessionID)
+	}
+	if next.State != StateCodeReview {
+		t.Errorf("State = %q, want %q", next.State, StateCodeReview)
 	}
 }
 
@@ -211,6 +240,33 @@ func TestOscillationEscalatesBeforeTheCap(t *testing.T) {
 	}
 	if next.State != StateEscalated {
 		t.Errorf("State = %q, want %q", next.State, StateEscalated)
+	}
+}
+
+func TestOscillationIsCheckedBeforeTheCapWhenBothAreTrue(t *testing.T) {
+	// The existing cap test uses iteration 3 against a cap of 10, and the
+	// existing oscillation test uses iteration 3 with no cap pressure, so
+	// neither ever exercises both conditions at once. Here iteration ==
+	// MaxIterations AND the fingerprint has already been seen, so the
+	// escalation reason must identify oscillation, not the cap -- pinning
+	// the order loop.go checks them in.
+	task := newTask()
+	task.MaxIterations = 10
+	task.State, task.Phase, task.Iteration = StatePlanReview, PhasePlan, 10
+	task.PlanSessionID = "plan-sess"
+
+	first := changesRequested("rename the helper")
+	task.FindingHashes = []string{first.Verdict.Fingerprint("any")}
+
+	act, next := Next(task, changesRequested("rename the helper"))
+	if act.Kind != ActEscalate {
+		t.Fatalf("Kind = %q, want %q", act.Kind, ActEscalate)
+	}
+	if next.State != StateEscalated {
+		t.Errorf("State = %q, want %q", next.State, StateEscalated)
+	}
+	if !strings.Contains(act.Reason, "oscillat") {
+		t.Errorf("Reason = %q, want it to identify oscillation rather than the iteration cap", act.Reason)
 	}
 }
 
@@ -313,7 +369,13 @@ func TestGrantMoreIterationsResumesTheParkedPhase(t *testing.T) {
 func TestNextIsPureAndDoesNotMutateInput(t *testing.T) {
 	task := newTask()
 	task.State, task.Phase, task.Iteration = StatePlanReview, PhasePlan, 1
-	task.FindingHashes = []string{"existing"}
+	// Built with spare capacity, the way a database scan-then-append would
+	// produce it. A slice literal always has cap == len, which would mask a
+	// missing slices.Clone in Next: the append it does would reallocate
+	// either way, so the input would look untouched even without the
+	// clone. Spare capacity is required to actually exercise the clone.
+	task.FindingHashes = make([]string, 1, 4)
+	task.FindingHashes[0] = "existing"
 
 	_, _ = Next(task, changesRequested("something"))
 	if task.Iteration != 1 {
@@ -321,5 +383,13 @@ func TestNextIsPureAndDoesNotMutateInput(t *testing.T) {
 	}
 	if len(task.FindingHashes) != 1 {
 		t.Errorf("input FindingHashes mutated to %v", task.FindingHashes)
+	}
+	// Re-slice to the full backing array: if Next appended into the
+	// caller's array instead of a clone, the fingerprint it wrote would be
+	// visible here at index 1, even though task.FindingHashes's own length
+	// (checked above) still looks untouched.
+	full := task.FindingHashes[:cap(task.FindingHashes)]
+	if full[1] != "" {
+		t.Errorf("Next wrote into the caller's backing array at index 1: %q", full[1])
 	}
 }

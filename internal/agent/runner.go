@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -150,11 +151,13 @@ func (r *Runner) Run(ctx context.Context, spec RunSpec) (Result, error) {
 	}
 
 	switch {
-	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		res.ErrMsg = fmt.Sprintf("step timeout after %s", timeout)
 	case res.ErrMsg != "":
 		// An error already reported inside the stream wins: it is more
-		// specific than the exit status.
+		// specific than a generic timeout or exit status. An agent that
+		// reports e.g. "not logged in" and then hangs must not have that
+		// reclassified as a retryable timeout.
+	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		res.ErrMsg = fmt.Sprintf("step timeout after %s", timeout)
 	case streamErr != nil:
 		res.ErrMsg = streamErr.Error()
 	case waitErr != nil:
@@ -232,13 +235,29 @@ func (r *Runner) consume(stdout io.Reader, transcript io.Writer, onEvent func(Ev
 }
 
 // retryableMarkers are substrings that indicate a transient failure.
+//
+// The HTTP status codes are matched together with their canonical reason
+// phrase, not as bare digits: a bare "500" or "503" is a common substring of
+// unrelated numbers and version strings (a token count, a byte count, a CLI
+// version like "v1.503.0"), so matching it alone produces false positives
+// that word-boundary matching cannot fix, since those numbers are already
+// whole tokens in their surrounding text.
 var retryableMarkers = []string{
-	"rate limit", "rate_limit", "429",
-	"500", "502", "503", "504",
+	"rate limit", "rate_limit",
+	"429 too many requests",
+	"500 internal server error",
+	"502 bad gateway",
+	"503 service unavailable",
+	"504 gateway timeout",
 	"connection reset", "connection refused", "broken pipe",
 	"timeout", "deadline exceeded", "temporarily unavailable",
-	"overloaded", "eof",
+	"overloaded",
 }
+
+// retryableTokenRe matches short, word-like markers that must stand alone.
+// "eof" must not match inside "geoff", so it needs a word boundary instead
+// of the plain substring test used for the multi-word phrases above.
+var retryableTokenRe = regexp.MustCompile(`\beof\b`)
 
 // IsRetryable reports whether an agent error message describes a transient
 // condition worth retrying. Authentication and usage errors are not
@@ -248,6 +267,9 @@ func IsRetryable(msg string) bool {
 		return false
 	}
 	l := strings.ToLower(msg)
+	if retryableTokenRe.MatchString(l) {
+		return true
+	}
 	for _, m := range retryableMarkers {
 		if strings.Contains(l, m) {
 			return true
