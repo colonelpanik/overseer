@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // PRRequest describes the pull request to open for a finished task.
@@ -92,7 +93,13 @@ func (g *GhOpener) existing(ctx context.Context, req PRRequest) (string, bool) {
 }
 
 // FakeOpener records requests instead of opening pull requests.
+//
+// The real engine reaches the pull-request step from several task workers at
+// once, so this must be safe for concurrent use — otherwise the first test that
+// finishes two tasks in parallel trips the race detector on the recording
+// itself rather than on anything it is meant to be testing.
 type FakeOpener struct {
+	mu    sync.Mutex
 	Calls []PRRequest
 	URL   string
 	Err   error
@@ -100,11 +107,24 @@ type FakeOpener struct {
 
 // Open records the request and returns the configured URL or error.
 func (f *FakeOpener) Open(_ context.Context, req PRRequest) (string, error) {
+	f.mu.Lock()
 	f.Calls = append(f.Calls, req)
-	if f.Err != nil {
-		return "", f.Err
+	err := f.Err
+	url := f.URL
+	f.mu.Unlock()
+
+	if err != nil {
+		return "", err
 	}
-	return f.URL, nil
+	return url, nil
+}
+
+// Recorded returns a copy of the requests seen so far. Tests that finish tasks
+// in parallel must read through this rather than touching Calls directly.
+func (f *FakeOpener) Recorded() []PRRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]PRRequest(nil), f.Calls...)
 }
 
 // PRTitle derives a PR title from a task goal: its first line, capped to 72
