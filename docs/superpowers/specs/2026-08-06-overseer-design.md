@@ -188,6 +188,41 @@ Each task is fully isolated. The user's own checkout is never touched.
    findings rendered as the next turn. Increment `iteration`.
 4. If `findings` is empty, the plan has converged.
 
+### The verify gate
+
+Nothing else in the loop runs the code. Codex reviews `git diff` and runs `-s read-only`,
+so it cannot execute anything; Claude is asked to run tests but nothing checks that it did.
+Both gates are model judgement, which a project that does not compile can satisfy.
+
+A configured `verify_command` runs in the worktree after every implementation turn and must
+exit zero **before** the code review. That ordering is deliberate: a failing build makes a
+review worthless and spends an iteration on findings that are all downstream of the
+breakage.
+
+```
+executing → verifying → code_review → (finish | resume)
+                ↓ fail
+             executing
+```
+
+A failure becomes a synthetic verdict carrying one `critical` finding, so it travels the
+existing path — rendered into the same Claude session, stored, shown on the dashboard, and
+counted for oscillation detection. `critical` means it blocks whatever `blocking_severity`
+is set to: a failing build must not be waved through because the review bar was relaxed.
+
+Fingerprinting needs care. Raw command output carries timings and temporary paths, so
+hashing it would make every failure look new and oscillation detection would never fire —
+a task stuck on one broken test would burn the whole iteration budget instead of escalating
+in three rounds. The finding therefore carries a *normalised* set of failure lines, with
+numbers and temp paths collapsed, alongside the raw output tail the agent needs to act on.
+
+There are no retries: a non-zero exit is a result, not a transport error, and inferring
+which failures are infrastructural from their text would silently retry genuine test
+failures whose messages happen to mention a network.
+
+With no command configured the gate is skipped and convergence keeps its weaker,
+review-only meaning.
+
 ### Execute loop
 
 Same shape, with one deliberate difference: it starts a **fresh** Claude session seeded
@@ -400,14 +435,36 @@ Both agents run inside a [bubblewrap](https://github.com/containers/bubblewrap) 
 | Mount | Access | Why |
 |---|---|---|
 | Task worktree | rw for Claude, **ro** for Codex | The work. The reviewer never writes. |
-| `<repo>/.git` | ro | Objects and refs, so `git log` and `git diff` work. |
-| `<repo>/.git/worktrees/<slug>` | rw for Claude | The worktree's index. Without it `git status` fails. |
-| Agent state dir (`~/.claude`, `~/.codex`) | rw | Session persistence, so `--resume` works. |
-| Agent config + plugins | **ro** | A writable config lets the agent plant a hook that runs on the next *unsandboxed* invocation. That is an escape, not a sandbox. |
+| Repository's git common dir | ro | Objects and refs, so `git log` and `git diff` work. Resolved with `rev-parse`, never assumed. |
+| The worktree's own git admin dir | rw for Claude | Its index. Without it `git status` fails. |
+| **Per-task** state dir → `~/.claude`, `~/.codex` | rw | Session persistence, so `--resume` works — but the source is overseer's, not the real directory. |
+| Real agent config, plugins, credentials | **ro**, layered on top | Read for auth and settings, never writable. |
+| `~/.claude.json` | rw, but a **per-task copy** | It carries top-level `mcpServers` — executable configuration that must not persist. |
 | Agent binary directories | ro | Both CLIs install as symlinks into versioned directories under `$HOME`. |
 | `<runs>/<slug>` | rw | Codex writes `--output-last-message` itself. |
 | Verdict schema file | ro | Codex reads `--output-schema` itself. |
+| Toolchain caches (`GOCACHE`, `GOMODCACHE`, …) | rw | Derived data. Without them a `$HOME` tmpfs forces a cold build and a full dependency re-download every turn. |
 | `/usr`, `/etc`, `/run/systemd/resolve` | ro | The system, and DNS. |
+
+**Why the state directory is inverted.** The obvious arrangement — mount the real
+`~/.claude` writable and pin `settings.json` read-only on top of it — does not hold. An
+optional mount is skipped when its source is absent, leaving the writable real parent
+exposed, so the agent creates the file itself and it runs on the next *unsandboxed*
+invocation. `~/.claude/settings.local.json` does not exist on a typical install, so that is
+the common case. Bubblewrap also creates a missing mount target *in the real directory*
+when the parent is writable, which is how the first attempt at this left a stray real file
+behind.
+
+Making a per-task directory the writable parent, with the real configuration layered back
+read-only, removes the whole class: nothing under the real state directory is writable, so
+nothing absent can be planted, and whatever the agent writes dies with the task. Sessions
+persist for the task's own lifetime, which is all `--resume` needs — verified with a real
+`claude -p` followed by a `--resume` that recovered its context.
+
+Credentials beyond the agents' own are deliberately **not** mounted: no `~/.netrc`,
+`~/.ssh`, or `~/.gitconfig`. A private dependency proxy therefore will not authenticate
+until an operator opts in via `sandbox_extra_read_only`, which is the right default — the
+alternative is handing credentials to an unattended agent.
 
 Everything else is absent: other repositories, dotfiles, `~/.ssh`, and overseer's own
 database. The data directory is never mounted whole, only the current task's run
