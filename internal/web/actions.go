@@ -43,6 +43,11 @@ func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/task/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
 }
 
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	s.eng.Resume()
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func (s *Server) handleAbandon(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {

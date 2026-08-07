@@ -48,10 +48,7 @@ type Engine struct {
 	running map[int64]bool
 
 	// pauseReason is non-empty when the whole run is halted, which happens
-	// on an authentication failure: every task would fail identically. It is
-	// always empty for now — Task 14 adds Pause and Resume to set it after
-	// detecting an unauthenticated CLI. The guards below already check it on
-	// every dispatch so that wiring lands without restructuring RunTask.
+	// on an authentication failure: every task would fail identically.
 	pauseReason string
 }
 
@@ -74,8 +71,21 @@ func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.
 	}, nil
 }
 
-// PauseReason returns why the run is paused, or "" when it is not. Nothing
-// sets it yet; Task 14 adds Pause and Resume.
+// Pause halts dispatch for every task until Resume is called.
+func (e *Engine) Pause(reason string) {
+	e.mu.Lock()
+	e.pauseReason = reason
+	e.mu.Unlock()
+}
+
+// Resume clears a pause.
+func (e *Engine) Resume() {
+	e.mu.Lock()
+	e.pauseReason = ""
+	e.mu.Unlock()
+}
+
+// PauseReason returns why the run is paused, or "" when it is not.
 func (e *Engine) PauseReason() string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -105,6 +115,15 @@ func (e *Engine) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	for {
+		if e.PauseReason() != "" {
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				return nil
+			case <-ticker.C:
+			}
+			continue
+		}
 		tasks, err := e.Store.ClaimableTasks(ctx)
 		if err != nil {
 			return err
@@ -157,6 +176,16 @@ func (e *Engine) release(id int64) {
 
 // RunTask drives one task from its current state to a terminal state.
 func (e *Engine) RunTask(ctx context.Context, taskID int64) error {
+	// Checked before the task is even loaded: a queued task must be left
+	// alone while the run is paused, not advanced into its first state
+	// transition only to be stopped at the dispatch guard below. The state
+	// machine's own Next call has no notion of "paused" — it would already
+	// have moved a queued task to "worktree" and persisted that before the
+	// dispatch guard ever ran.
+	if reason := e.PauseReason(); reason != "" {
+		return nil
+	}
+
 	task, err := e.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -439,6 +468,10 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase, name str
 		case <-ctx.Done():
 			return res, step, ctx.Err()
 		}
+	}
+
+	if res.ErrMsg != "" && agent.IsAuthFailure(res.ErrMsg) {
+		e.Pause(fmt.Sprintf("%s is not authenticated: %s", name, res.ErrMsg))
 	}
 
 	// The verdict is attached by recordFindings; here we only close the step.

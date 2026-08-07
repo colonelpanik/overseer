@@ -95,7 +95,16 @@
   <h1><a href="/" style="text-decoration:none;color:inherit">overseer</a></h1>
   <span class="live" id="live">connecting…</span>
 </header>
-<main>{{template "content" .}}</main>
+<main>
+  {{if .PauseReason}}
+  <div class="banner" style="border-color:var(--red)">
+    <p style="margin:0 0 .6rem"><strong>Run paused:</strong> {{.PauseReason}}</p>
+    <p class="meta" style="margin:0 0 .6rem">No tasks will start until this is cleared. Log the CLI in, then resume.</p>
+    <form method="post" action="/resume"><button class="primary" type="submit">Resume run</button></form>
+  </div>
+  {{end}}
+  {{template "content" .}}
+</main>
 <script>
   // Reload on any state change the daemon reports. The pages are cheap to
   // render server-side, so a reload is simpler and less to get wrong than

@@ -43,8 +43,9 @@ type TaskCard struct {
 
 // BoardView is the board page's data.
 type BoardView struct {
-	Title string
-	Tasks []TaskCard
+	Title       string
+	Tasks       []TaskCard
+	PauseReason string
 }
 
 // TimelineEntry is one agent step plus the findings it produced.
@@ -56,14 +57,15 @@ type TimelineEntry struct {
 
 // TaskView is the task page's data.
 type TaskView struct {
-	Title     string
-	Task      store.Task
-	Totals    store.Totals
-	Badge     string
-	Progress  string
-	Timeline  []TimelineEntry
-	PunchList []store.Finding
-	TakeOver  string
+	Title       string
+	Task        store.Task
+	Totals      store.Totals
+	Badge       string
+	Progress    string
+	Timeline    []TimelineEntry
+	PunchList   []store.Finding
+	TakeOver    string
+	PauseReason string
 }
 
 // humanDuration renders a duration compactly for the dashboard.

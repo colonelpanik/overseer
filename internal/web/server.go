@@ -63,6 +63,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /tasks", s.handleCreateTask)
 	mux.HandleFunc("POST /task/{id}/continue", s.handleContinue)
 	mux.HandleFunc("POST /task/{id}/abandon", s.handleAbandon)
+	mux.HandleFunc("POST /resume", s.handleResume)
 	mux.HandleFunc("GET /task/{id}/transcript/{stepID}", s.handleTranscript)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok\n"))
@@ -81,7 +82,7 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view := BoardView{Title: "board"}
+	view := BoardView{Title: "board", PauseReason: s.eng.PauseReason()}
 	for _, t := range tasks {
 		totals, err := s.store.TaskTotals(r.Context(), t.ID)
 		if err != nil {
@@ -121,7 +122,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	view := TaskView{
 		Title: task.Slug, Task: task, Totals: totals,
 		Badge: Badge(task.State), Progress: Progress(task),
-		TakeOver: s.eng.TakeOverHint(task),
+		TakeOver: s.eng.TakeOverHint(task), PauseReason: s.eng.PauseReason(),
 	}
 	for _, step := range steps {
 		findings, err := s.store.ListFindings(r.Context(), step.ID)
