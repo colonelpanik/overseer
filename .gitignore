@@ -2,3 +2,4 @@
 overseer
 *.sqlite
 *.sqlite-*
+.superpowers/
