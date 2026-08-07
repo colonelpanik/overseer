@@ -66,3 +66,19 @@ func TestLoadRejectsUnknownSeverity(t *testing.T) {
 		t.Fatal("expected error for unknown blocking_severity")
 	}
 }
+
+func TestSandboxDefaultsToAuto(t *testing.T) {
+	if c := Default(); c.Sandbox != "auto" {
+		t.Errorf("Sandbox = %q, want auto", c.Sandbox)
+	}
+}
+
+func TestLoadRejectsUnknownSandboxMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("sandbox: yolo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for an unknown sandbox mode")
+	}
+}

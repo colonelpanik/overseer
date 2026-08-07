@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,25 +60,30 @@ func TestPauseStopsATaskThatIsAlreadyMidFlight(t *testing.T) {
 	// while another task is mid-step. Checking the pause only when RunTask
 	// starts would let that second task keep dispatching doomed calls.
 	//
-	// This Claude pauses the run from inside its first invocation, standing in
+	// This test pauses the run as soon as the first step finishes, standing in
 	// for another worker doing so concurrently.
-	marker := filepath.Join(t.TempDir(), "calls")
-	claude := writeScript(t, "claude", `
-n=0
-[ -f `+marker+` ] && n=$(cat `+marker+`)
-n=$((n+1)); echo $n > `+marker+`
-echo '{"type":"system","subtype":"init","session_id":"claude-sess"}'
-echo '# plan' > PLAN.md
-echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude-sess","total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}'
-`)
-	h := newHarness(t, claude, fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	//
+	// The completed step is detected through the store rather than a
+	// coordination file dropped outside the task's own directories: under the
+	// sandbox, a fake agent can only write where a real one could, so a
+	// side-channel marker file in an arbitrary host temp dir is never visible
+	// to it.
+	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
 	ctx := context.Background()
 
 	// Pause as soon as the first step completes.
-	h.eng.OnChange = func(int64) {
-		if h.eng.PauseReason() == "" {
-			if raw, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(raw)) != "" {
+	h.eng.OnChange = func(id int64) {
+		if h.eng.PauseReason() != "" {
+			return
+		}
+		steps, err := h.st.ListSteps(ctx, id)
+		if err != nil {
+			return
+		}
+		for _, s := range steps {
+			if s.State != "" && s.State != "running" {
 				h.eng.Pause("another worker hit an auth failure")
+				return
 			}
 		}
 	}

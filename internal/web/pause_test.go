@@ -33,6 +33,14 @@ func TestBoardHasNoBannerWhenRunning(t *testing.T) {
 	}
 }
 
+func TestBoardShowsTheSandboxMode(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.eng.SandboxNote = "sandbox off: agents run UNSANDBOXED with this user's full filesystem access"
+	if !strings.Contains(get(t, s, "/").Body.String(), "UNSANDBOXED") {
+		t.Error("an unsandboxed run must be visible on the board")
+	}
+}
+
 func TestPostResumeClearsThePause(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.eng.Pause("no credentials")

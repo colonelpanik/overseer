@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"overseer/internal/sandbox"
 )
 
 // Result summarises one completed agent invocation.
@@ -42,6 +44,10 @@ type RunSpec struct {
 	// Attempt is the 1-based retry attempt, written into the transcript as a
 	// marker so a retried step's history stays readable.
 	Attempt int
+	// Sandbox, when set, rewrites the command so it runs confined.
+	Sandbox sandbox.Wrapper
+	// SandboxSpec describes what the sandbox exposes.
+	SandboxSpec sandbox.Spec
 }
 
 // Runner executes one agent CLI and normalises its output.
@@ -97,7 +103,11 @@ func (r *Runner) Run(ctx context.Context, spec RunSpec) (Result, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.Command(r.Bin, spec.Args...)
+	bin, argv := r.Bin, spec.Args
+	if spec.Sandbox != nil {
+		bin, argv = spec.Sandbox.Wrap(bin, argv, spec.SandboxSpec)
+	}
+	cmd := exec.Command(bin, argv...)
 	cmd.Dir = spec.Dir
 	// Stdin must be an immediately-EOF reader: codex exec appends piped
 	// stdin to the prompt and blocks waiting for EOF.
@@ -121,7 +131,7 @@ func (r *Runner) Run(ctx context.Context, spec RunSpec) (Result, error) {
 		// re-claim the still-active task every poll — an infinite retry that
 		// accumulates a "running" step row each time.
 		res.ExitCode = -1
-		res.ErrMsg = fmt.Sprintf("start %s: %v", r.Bin, err)
+		res.ErrMsg = fmt.Sprintf("start %s: %v", bin, err)
 		return res, nil
 	}
 

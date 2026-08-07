@@ -46,6 +46,9 @@ type BoardView struct {
 	Title       string
 	Tasks       []TaskCard
 	PauseReason string
+	// SandboxNote describes the active sandbox mode. An unsandboxed run must
+	// be visible on the board, not buried in a log line.
+	SandboxNote string
 }
 
 // TimelineEntry is one agent step plus the findings it produced.

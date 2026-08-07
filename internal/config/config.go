@@ -24,6 +24,20 @@ type Config struct {
 	ClaudeBin        string        `yaml:"claude_bin"`
 	CodexBin         string        `yaml:"codex_bin"`
 	GhBin            string        `yaml:"gh_bin"`
+
+	// Sandbox is auto, bwrap or off. auto uses bwrap when it works and
+	// warns loudly when it does not.
+	Sandbox  string `yaml:"sandbox"`
+	BwrapBin string `yaml:"bwrap_bin"`
+	// SandboxCachePaths are toolchain caches mounted writable. They are
+	// derived data, and without them a $HOME tmpfs forces a cold build cache
+	// and a full dependency re-download on every agent turn.
+	SandboxCachePaths []string `yaml:"sandbox_cache_paths"`
+	// SandboxExtraReadOnly and SandboxExtraReadWrite are operator escape
+	// hatches for what the defaults cannot know about. Both are empty by
+	// default: mounting credentials hands them to the agent.
+	SandboxExtraReadOnly  []string `yaml:"sandbox_extra_read_only"`
+	SandboxExtraReadWrite []string `yaml:"sandbox_extra_read_write"`
 }
 
 // ValidSeverities are the accepted blocking-severity thresholds, loosest first.
@@ -45,6 +59,17 @@ func Default() Config {
 		ClaudeBin:        "claude",
 		CodexBin:         "codex",
 		GhBin:            "gh",
+		Sandbox:          "auto",
+		BwrapBin:         "bwrap",
+		// These cover the common toolchains; a path that does not exist is
+		// skipped, so listing several is harmless.
+		SandboxCachePaths: []string{
+			"$HOME/.cache/go-build",
+			"$HOME/go/pkg/mod",
+			"$HOME/.cargo/registry",
+			"$HOME/.npm",
+			"$HOME/.cache/pip",
+		},
 	}
 }
 
@@ -70,12 +95,23 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) validate() error {
+	found := false
 	for _, s := range ValidSeverities {
 		if c.BlockingSeverity == s {
-			return nil
+			found = true
+			break
 		}
 	}
-	return fmt.Errorf("blocking_severity %q must be one of %v", c.BlockingSeverity, ValidSeverities)
+	if !found {
+		return fmt.Errorf("blocking_severity %q must be one of %v", c.BlockingSeverity, ValidSeverities)
+	}
+
+	switch c.Sandbox {
+	case "auto", "bwrap", "off":
+	default:
+		return fmt.Errorf("sandbox %q must be auto, bwrap or off", c.Sandbox)
+	}
+	return nil
 }
 
 // RunsDir is where per-step agent transcripts are written.

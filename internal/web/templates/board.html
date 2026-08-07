@@ -13,6 +13,10 @@
   </div>
 </form>
 
+{{if .SandboxNote}}
+<p class="meta" style="margin:-.75rem 0 1.25rem">{{.SandboxNote}}</p>
+{{end}}
+
 {{if not .Tasks}}<p class="empty">No tasks yet. Queue one above, or run <code>overseer submit tasks.yaml</code>.</p>{{end}}
 
 <div class="cards">

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"overseer/internal/sandbox"
 )
 
 // writeFakeAgent creates an executable script that prints body to stdout.
@@ -239,6 +241,51 @@ func TestRunNonExecutableBinaryIsAFailedResult(t *testing.T) {
 	if res.ErrMsg == "" {
 		t.Error("a permission-denied start must be reported in ErrMsg")
 	}
+}
+
+func TestRunAppliesTheSandboxWrapper(t *testing.T) {
+	// A stub wrapper proves the runner routes through it without needing
+	// bwrap on the test host.
+	bin := writeFakeAgent(t, `echo '{"type":"result","subtype":"success","is_error":false,"session_id":"s","total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}'`)
+	r := NewClaudeRunner("this-binary-does-not-exist")
+
+	var n int
+	stub := stubWrapper{bin: bin, n: &n}
+	res, err := r.Run(context.Background(), RunSpec{
+		Args:           []string{"-p", "hi"},
+		Dir:            t.TempDir(),
+		TranscriptPath: filepath.Join(t.TempDir(), "t.jsonl"),
+		Timeout:        30 * time.Second,
+		Sandbox:        stub,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ErrMsg != "" {
+		t.Fatalf("ErrMsg = %q; the wrapper's binary should have run", res.ErrMsg)
+	}
+	if stub.calls() == 0 {
+		t.Error("the runner did not consult the sandbox wrapper")
+	}
+}
+
+type stubWrapper struct {
+	bin string
+	n   *int
+}
+
+func (s stubWrapper) Wrap(_ string, args []string, _ sandbox.Spec) (string, []string) {
+	if s.n != nil {
+		*s.n++
+	}
+	return s.bin, args
+}
+func (stubWrapper) Name() string { return "stub" }
+func (s stubWrapper) calls() int {
+	if s.n == nil {
+		return 0
+	}
+	return *s.n
 }
 
 func TestIsRetryable(t *testing.T) {

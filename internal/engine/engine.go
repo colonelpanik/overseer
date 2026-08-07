@@ -14,6 +14,7 @@ import (
 	"overseer/internal/agent"
 	"overseer/internal/config"
 	"overseer/internal/loop"
+	"overseer/internal/sandbox"
 	"overseer/internal/store"
 	"overseer/internal/worktree"
 )
@@ -35,6 +36,11 @@ type Engine struct {
 
 	// SchemaPath is the materialised verdict schema passed to Codex.
 	SchemaPath string
+
+	// Sandbox confines the agent subprocesses.
+	Sandbox sandbox.Wrapper
+	// SandboxNote describes the active mode, for logs and the dashboard.
+	SandboxNote string
 
 	// RetryBackoff is the base delay between retries; tests shorten it.
 	RetryBackoff time.Duration
@@ -58,6 +64,10 @@ func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.
 	if err != nil {
 		return nil, err
 	}
+	wrapper, note, err := sandbox.Select(cfg.Sandbox, cfg.BwrapBin)
+	if err != nil {
+		return nil, err
+	}
 	return &Engine{
 		Cfg:          cfg,
 		Store:        st,
@@ -66,6 +76,8 @@ func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.
 		Claude:       agent.NewClaudeRunner(cfg.ClaudeBin),
 		Codex:        agent.NewCodexRunner(cfg.CodexBin),
 		SchemaPath:   schemaPath,
+		Sandbox:      wrapper,
+		SandboxNote:  note,
 		RetryBackoff: 5 * time.Second,
 		running:      map[int64]bool{},
 	}, nil
@@ -425,8 +437,14 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase, name str
 	transcript := filepath.Join(e.runDir(*task),
 		fmt.Sprintf("%s-%d-%s.jsonl", phase, task.Iteration, name))
 
-	if err := os.MkdirAll(e.runDir(*task), 0o755); err != nil {
-		return agent.Result{}, store.Step{}, fmt.Errorf("create run dir: %w", err)
+	// Required writable mounts must exist before wrapping: bubblewrap aborts
+	// on a missing --bind source. Optional paths use --bind-try instead and
+	// are not created here.
+	if err := sandbox.EnsureDirs(e.runDir(*task)); err != nil {
+		return agent.Result{}, store.Step{}, err
+	}
+	if err := e.prepareAgentState(*task, name); err != nil {
+		return agent.Result{}, store.Step{}, err
 	}
 
 	step, err := e.Store.StartStep(ctx, store.Step{
@@ -451,6 +469,8 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase, name str
 			TranscriptPath: transcript,
 			Timeout:        e.Cfg.StepTimeout,
 			Attempt:        attempt,
+			Sandbox:        e.Sandbox,
+			SandboxSpec:    e.sandboxSpec(*task, name),
 		})
 		if err != nil {
 			return agent.Result{}, store.Step{}, err
@@ -598,6 +618,165 @@ func (e *Engine) notify(taskID int64) {
 	if e.OnChange != nil {
 		e.OnChange(taskID)
 	}
+}
+
+// sandboxSpec builds the mounts one agent needs.
+//
+// The rule is: an empty tmpfs over $HOME, then re-expose exactly what the
+// agent must have. Anything not listed here — other repositories, dotfiles,
+// SSH keys, the overseer database — is simply absent.
+func (e *Engine) sandboxSpec(task store.Task, agentName string) sandbox.Spec {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	writable := agentName == "claude" // the reviewer never writes
+
+	spec := sandbox.Spec{
+		HomeDir: home,
+		WorkDir: task.WorktreeDir,
+		PathEnv: os.Getenv("PATH"),
+	}
+
+	// The agent binary. Installed as a symlink into a versioned directory
+	// under $HOME, so both directories are needed.
+	binary := e.Cfg.ClaudeBin
+	if agentName == "codex" {
+		binary = e.Cfg.CodexBin
+	}
+	for _, m := range sandbox.BinMounts(binary) {
+		spec = spec.AddAt(m.Src, m.Dest, m.Write)
+	}
+
+	// The agent's own state.
+	//
+	// The writable parent is a per-task directory of overseer's, NOT the real
+	// state directory, with the real configuration layered read-only on top.
+	// Mounting the real directory writable and pinning config files read-only
+	// individually does not work: a config file that does not exist yet is
+	// skipped by the optional mount, leaving the writable real parent exposed,
+	// and the agent can simply create it. It then runs on the next
+	// unsandboxed invocation. `~/.claude/settings.local.json` is absent on a
+	// typical install, so that hole is the common case rather than an edge
+	// case.
+	//
+	// Inverting it removes the class of bug: nothing under the real state
+	// directory is writable, so nothing absent can be planted, and whatever
+	// the agent does write dies with the task. Sessions still persist for the
+	// task's own lifetime, which is all `--resume` needs.
+	if home != "" {
+		stateDir := e.agentStateDir(task, agentName)
+		real := filepath.Join(home, "."+agentName)
+		switch agentName {
+		case "claude":
+			spec = spec.
+				// The per-task directory becomes ~/.claude inside.
+				AddAt(stateDir, real, true).
+				// Then the real config is layered back, read-only. These are
+				// optional because a not-yet-used install lacks them — and
+				// being absent is now harmless, since the parent is not the
+				// real directory.
+				AddOptional(filepath.Join(real, ".credentials.json"), false).
+				AddOptional(filepath.Join(real, "settings.json"), false).
+				AddOptional(filepath.Join(real, "plugins"), false).
+				AddOptional(filepath.Join(real, "skills"), false).
+				// ~/.claude.json carries top-level mcpServers — executable
+				// configuration — so the agent gets a per-task copy, never
+				// the real file.
+				AddAt(e.agentStateFile(task, "claude.json"),
+					filepath.Join(home, ".claude.json"), true)
+		case "codex":
+			spec = spec.
+				AddAt(stateDir, real, true).
+				AddOptional(filepath.Join(real, "auth.json"), false).
+				AddOptional(filepath.Join(real, "config.toml"), false).
+				AddOptional(filepath.Join(real, "packages"), false)
+		}
+	}
+
+	// The work itself. The worktree's .git is a file pointing into the
+	// repository's shared git directory, so that directory must be readable
+	// and this worktree's own administrative directory writable, or even
+	// `git status` fails. Both were resolved with rev-parse when the worktree
+	// was created; they are never derived from RepoPath, because a submitted
+	// path may itself be a linked worktree whose .git is a file.
+	spec = spec.
+		Add(task.GitCommonDir, false).
+		Add(task.GitAdminDir, writable).
+		Add(task.WorktreeDir, writable)
+
+	// Codex reads the schema and writes its last-message file itself, so
+	// both need mounts. Only this task's run directory is exposed — never
+	// the whole data directory, which holds the database.
+	spec = spec.
+		Add(e.SchemaPath, false).
+		Add(e.runDir(task), true)
+
+	// Toolchain caches. Without these, a $HOME tmpfs hides GOCACHE and
+	// GOMODCACHE, so the agent's own test runs start from a cold cache and
+	// re-download every dependency on every iteration — minutes per turn on a
+	// real repository, and an outright failure for a private module that
+	// needs credentials this sandbox deliberately withholds. They are derived
+	// data, so exposing them writable costs nothing.
+	for _, p := range e.Cfg.SandboxCachePaths {
+		spec = spec.AddOptional(os.ExpandEnv(p), true)
+	}
+	// Operator-supplied extras, for cases the defaults cannot cover — a
+	// private module proxy needing ~/.netrc, say. Deliberately not default:
+	// mounting credentials hands them to the agent.
+	for _, p := range e.Cfg.SandboxExtraReadOnly {
+		spec = spec.AddOptional(os.ExpandEnv(p), false)
+	}
+	for _, p := range e.Cfg.SandboxExtraReadWrite {
+		spec = spec.AddOptional(os.ExpandEnv(p), true)
+	}
+
+	return spec
+}
+
+// agentStateDir is the per-task directory that stands in for the agent's real
+// state directory inside the sandbox.
+func (e *Engine) agentStateDir(task store.Task, agentName string) string {
+	return filepath.Join(e.runDir(task), "state-"+agentName)
+}
+
+// agentStateFile is a per-task stand-in for a single state file.
+func (e *Engine) agentStateFile(task store.Task, name string) string {
+	return filepath.Join(e.runDir(task), "state-files", name)
+}
+
+// prepareAgentState creates the per-task state directory and seeds the files
+// the agent expects to find already populated.
+//
+// ~/.claude.json is seeded from the real one because Claude reads project
+// state from it, but the copy is never written back: it carries top-level
+// mcpServers, which is executable configuration, so changes must not persist.
+func (e *Engine) prepareAgentState(task store.Task, agentName string) error {
+	if err := sandbox.EnsureDirs(e.agentStateDir(task, agentName)); err != nil {
+		return err
+	}
+	if agentName != "claude" {
+		return nil
+	}
+
+	dest := e.agentStateFile(task, "claude.json")
+	if err := sandbox.EnsureDirs(filepath.Dir(dest)); err != nil {
+		return err
+	}
+	if _, err := os.Stat(dest); err == nil {
+		return nil // already seeded for this task
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return os.WriteFile(dest, []byte("{}\n"), 0o600)
+	}
+	src, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		// A fresh install has none; an empty object is a valid starting point.
+		return os.WriteFile(dest, []byte("{}\n"), 0o600)
+	}
+	return os.WriteFile(dest, src, 0o600)
 }
 
 // toLoop projects a stored task onto the state machine's view of it.

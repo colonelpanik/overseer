@@ -188,17 +188,21 @@ func TestRunTaskConvergesFirstTimeAndOpensDraftPR(t *testing.T) {
 
 func TestRunTaskLoopsUntilCodexStopsFindingThings(t *testing.T) {
 	// A Codex that objects twice, then approves. The counter file makes the
-	// script stateful across invocations.
-	counter := filepath.Join(t.TempDir(), "n")
+	// script stateful across invocations. It lives next to the last-message
+	// file rather than in an arbitrary host temp dir, because that is the one
+	// path this script is guaranteed to have write access to under the
+	// sandbox: it is passed in on argv, and the engine mounts its directory
+	// (the task's run dir) writable for exactly this reason.
 	codex := writeScript(t, "codex", `
 last=""; prev=""
 for a in "$@"; do
   if [ "$prev" = "--output-last-message" ]; then last="$a"; fi
   prev="$a"
 done
+counter="$(dirname "$last")/counter"
 n=0
-[ -f `+counter+` ] && n=$(cat `+counter+`)
-n=$((n+1)); echo $n > `+counter+`
+[ -f "$counter" ] && n=$(cat "$counter")
+n=$((n+1)); echo $n > "$counter"
 echo '{"type":"thread.started","thread_id":"codex-thread"}'
 if [ "$n" -le 2 ]; then
   printf '%s' '{"verdict":"changes_requested","findings":[{"severity":"major","summary":"finding number '"$n"'","file":null,"line":null}]}' > "$last"
@@ -302,11 +306,14 @@ exit 1`)
 }
 
 func TestRunTaskRetriesRetryableErrorWithoutSpendingAnIteration(t *testing.T) {
-	counter := filepath.Join(t.TempDir(), "n")
+	// The counter file is a relative path, landing in the process's working
+	// directory — the task worktree, which is writable for claude both with
+	// and without the sandbox — rather than an arbitrary host temp dir a
+	// sandboxed agent would have no access to.
 	claude := writeScript(t, "claude", `
 n=0
-[ -f `+counter+` ] && n=$(cat `+counter+`)
-n=$((n+1)); echo $n > `+counter+`
+[ -f n ] && n=$(cat n)
+n=$((n+1)); echo $n > n
 if [ "$n" = "1" ]; then echo '429 Too Many Requests' >&2; exit 1; fi
 echo '{"type":"system","subtype":"init","session_id":"claude-sess"}'
 echo '# plan' > PLAN.md

@@ -82,7 +82,11 @@ func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view := BoardView{Title: "board", PauseReason: s.eng.PauseReason()}
+	view := BoardView{
+		Title:       "board",
+		PauseReason: s.eng.PauseReason(),
+		SandboxNote: s.eng.SandboxNote,
+	}
 	for _, t := range tasks {
 		totals, err := s.store.TaskTotals(r.Context(), t.ID)
 		if err != nil {

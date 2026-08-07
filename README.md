@@ -40,6 +40,8 @@ max_parallel: 3          # tasks in flight at once
 max_iterations: 10       # per phase, then the task parks for a human
 step_timeout: 30m
 blocking_severity: any   # any | minor | major | critical
+sandbox: auto            # auto | bwrap | off
+bwrap_bin: bwrap
 ```
 
 `blocking_severity: any` means every Codex finding, including nits, keeps the
@@ -57,21 +59,24 @@ iteration 10 would just cost money. The dashboard offers **continue**,
 
 ## Safety
 
-- **Claude is not sandboxed.** It runs with `--permission-mode
-  bypassPermissions`, which skips the permission system rather than narrowing
-  it. Its working directory is the task's worktree, but that is a starting
-  directory, not a boundary: it can read and write any absolute path the
-  daemon's user can, including your other repositories, your dotfiles, and
-  `~/.ssh`. Omitting `--add-dir` changes nothing, because `--add-dir` only
-  extends an allow-list that is already bypassed.
-
-  In practice each task's *intended* work is confined to a throwaway worktree,
-  and a misbehaving agent has never been the failure mode in the manual
-  workflow this replaces. But run overseer as a user whose reach you are
-  willing to hand to an unattended agent. Real confinement needs an OS-level
-  sandbox — a container, `bwrap`, or `systemd-run` with `ProtectHome` — which
-  overseer does not set up.
-- Codex always runs `-s read-only`. The reviewer cannot write.
+- Agents run inside a [bubblewrap](https://github.com/containers/bubblewrap)
+  sandbox by default (`sandbox: auto`). `$HOME` becomes an empty tmpfs and only
+  what the agent needs is mounted back: the task worktree, the repository's git
+  directory, the agent's own state directory, and its binary. Other
+  repositories, your dotfiles, `~/.ssh`, and overseer's own database are simply
+  absent. The agent's configuration (`~/.claude/settings.json`, its plugin
+  directory, `~/.codex/config.toml`) is mounted read-only, so a sandboxed agent
+  cannot plant a hook that would run on the next unsandboxed invocation.
+- Network is **not** restricted — the agents call an HTTPS API. The sandbox
+  limits what an agent can read and write, not what it can send. Do not point
+  overseer at a repository whose contents you would not want an agent to
+  transmit.
+- `sandbox: off` disables this. `--permission-mode bypassPermissions` skips the
+  permission system rather than narrowing it, so with the sandbox off the agent
+  has this user's full filesystem access. The board says so on every page when
+  that is the case.
+- Codex additionally runs `-s read-only`, and its worktree mount is read-only.
+  The reviewer cannot write.
 - Nothing merges. Pull requests are always drafts.
 - Codex output that cannot be parsed into a verdict fails the task. It is
   never read as approval.
