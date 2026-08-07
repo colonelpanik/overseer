@@ -1,5 +1,5 @@
 .overseer/
-overseer
+/overseer
 *.sqlite
 *.sqlite-*
 .superpowers/

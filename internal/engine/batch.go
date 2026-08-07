@@ -2,23 +2,75 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
+	"overseer/internal/config"
 	"overseer/internal/loop"
 	"overseer/internal/store"
 	"overseer/internal/worktree"
 )
 
-// BatchTask is one entry submitted to the engine. Task 11 (the CLI) parses a
-// task file into these; the shape is fixed here so that work does not need
-// to change it.
+// BatchTask is one entry submitted to the engine, whether it came from a
+// parsed task file or was built directly (as the engine's own tests do). The
+// yaml tags let ParseBatch decode a task file straight into this shape.
 type BatchTask struct {
-	Repo             string
-	Goal             string
-	Constraints      []string
-	BlockingSeverity string
+	Repo             string   `yaml:"repo"`
+	Goal             string   `yaml:"goal"`
+	Constraints      []string `yaml:"constraints"`
+	BlockingSeverity string   `yaml:"blocking_severity"`
+}
+
+// Batch is a submitted task file. It carries tasks only: daemon settings
+// live in the config file so a second submit cannot change a live run.
+type Batch struct {
+	Tasks []BatchTask `yaml:"tasks"`
+}
+
+// ParseBatch decodes and validates a task file.
+func ParseBatch(raw []byte) (Batch, error) {
+	var b Batch
+	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	// KnownFields rejects daemon settings such as max_parallel, which belong
+	// in the config file rather than a batch.
+	dec.KnownFields(true)
+	// An empty document decodes to io.EOF rather than a nil error with a
+	// zero-value Batch; the len(b.Tasks) == 0 check below reports that case
+	// as "no tasks" instead of treating it as a hard parse error.
+	if err := dec.Decode(&b); err != nil && !errors.Is(err, io.EOF) {
+		return Batch{}, fmt.Errorf("parse batch: %w", err)
+	}
+	if len(b.Tasks) == 0 {
+		return Batch{}, errors.New("parse batch: no tasks")
+	}
+	for i, t := range b.Tasks {
+		if strings.TrimSpace(t.Repo) == "" {
+			return Batch{}, fmt.Errorf("parse batch: task %d has no repo", i+1)
+		}
+		if strings.TrimSpace(t.Goal) == "" {
+			return Batch{}, fmt.Errorf("parse batch: task %d has no goal", i+1)
+		}
+		if t.BlockingSeverity == "" {
+			continue
+		}
+		valid := false
+		for _, s := range config.ValidSeverities {
+			if t.BlockingSeverity == s {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return Batch{}, fmt.Errorf("parse batch: task %d has blocking_severity %q, want one of %v",
+				i+1, t.BlockingSeverity, config.ValidSeverities)
+		}
+	}
+	return b, nil
 }
 
 // Submit queues one task after checking the repository is usable.
@@ -61,4 +113,65 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 			return store.Task{}, err
 		}
 	}
+}
+
+// SubmitBatch queues every task in a batch, returning what it created.
+func (e *Engine) SubmitBatch(ctx context.Context, b Batch) ([]store.Task, error) {
+	var out []store.Task
+	for i, bt := range b.Tasks {
+		task, err := e.Submit(ctx, bt)
+		if err != nil {
+			return out, fmt.Errorf("task %d: %w", i+1, err)
+		}
+		out = append(out, task)
+	}
+	return out, nil
+}
+
+// ContinueEscalated grants a parked task another budget of iterations and
+// returns it to its phase's working state.
+func (e *Engine) ContinueEscalated(ctx context.Context, taskID int64, extra int) error {
+	task, err := e.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.State != string(loop.StateEscalated) {
+		return fmt.Errorf("task %d is %s, not escalated", taskID, task.State)
+	}
+	applyLoop(&task, loop.GrantMoreIterations(toLoop(task), extra))
+	task.ErrMsg = ""
+	if err := e.Store.SaveTask(ctx, task); err != nil {
+		return err
+	}
+	e.notify(taskID)
+	return nil
+}
+
+// Abandon marks a task failed on purpose, keeping its branch and worktree.
+func (e *Engine) Abandon(ctx context.Context, taskID int64) error {
+	task, err := e.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	task.State = string(loop.StateFailed)
+	if task.ErrMsg == "" {
+		task.ErrMsg = "abandoned by the operator"
+	}
+	if err := e.Store.SaveTask(ctx, task); err != nil {
+		return err
+	}
+	e.notify(taskID)
+	return nil
+}
+
+// TakeOverHint returns the commands for driving a parked task by hand.
+func (e *Engine) TakeOverHint(task store.Task) string {
+	session := task.PlanSessionID
+	if task.Phase == string(loop.PhaseExec) && task.ExecSessionID != "" {
+		session = task.ExecSessionID
+	}
+	if session == "" {
+		return fmt.Sprintf("cd %s", task.WorktreeDir)
+	}
+	return fmt.Sprintf("cd %s && claude --resume %s", task.WorktreeDir, session)
 }
