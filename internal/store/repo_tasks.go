@@ -88,8 +88,14 @@ func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
 	if hashes != "" {
 		t.FindingHashes = strings.Split(hashes, "\n")
 	}
-	t.CreatedAt, _ = time.Parse(rfc3339, created)
-	t.UpdatedAt, _ = time.Parse(rfc3339, updated)
+	t.CreatedAt, err = time.Parse(rfc3339, created)
+	if err != nil {
+		return Task{}, fmt.Errorf("parse created_at: %w", err)
+	}
+	t.UpdatedAt, err = time.Parse(rfc3339, updated)
+	if err != nil {
+		return Task{}, fmt.Errorf("parse updated_at: %w", err)
+	}
 	return t, nil
 }
 

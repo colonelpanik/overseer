@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -45,6 +46,61 @@ func TestCreateAndGetTask(t *testing.T) {
 	}
 	if got.Slug != "add-csv-export" || got.Goal != "Add CSV export" {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+}
+
+func TestTimestampsRoundTripThroughGetTask(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	created, err := s.CreateTask(ctx, Task{Slug: "ts-round-trip", RepoPath: "/r", Goal: "g", State: "queued"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	got, err := s.GetTask(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+
+	if got.CreatedAt.IsZero() {
+		t.Error("GetTask: CreatedAt is zero after round trip")
+	}
+	if got.UpdatedAt.IsZero() {
+		t.Error("GetTask: UpdatedAt is zero after round trip")
+	}
+
+	// The stored format (RFC3339Nano) round-trips exactly, but we compare
+	// with a tolerance rather than requiring exact time.Time equality,
+	// since exact equality on time.Time is fragile (monotonic reading,
+	// location) even when the wall-clock instant is identical.
+	if diff := got.CreatedAt.Sub(created.CreatedAt); diff < -time.Second || diff > time.Second {
+		t.Errorf("GetTask.CreatedAt = %v, want within 1s of written value %v (diff %v)",
+			got.CreatedAt, created.CreatedAt, diff)
+	}
+	if diff := got.UpdatedAt.Sub(created.UpdatedAt); diff < -time.Second || diff > time.Second {
+		t.Errorf("GetTask.UpdatedAt = %v, want within 1s of written value %v (diff %v)",
+			got.UpdatedAt, created.UpdatedAt, diff)
+	}
+}
+
+func TestGetTaskCorruptTimestampReturnsError(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+
+	task, err := s.CreateTask(ctx, Task{Slug: "bad-timestamp", RepoPath: "/r", Goal: "g", State: "queued"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE tasks SET created_at = ? WHERE id = ?`, "not-a-timestamp", task.ID,
+	); err != nil {
+		t.Fatalf("corrupt created_at: %v", err)
+	}
+
+	if _, err := s.GetTask(ctx, task.ID); err == nil {
+		t.Fatal("GetTask: want error for corrupt created_at, got nil")
 	}
 }
 
