@@ -213,8 +213,24 @@ is set to: a failing build must not be waved through because the review bar was 
 Fingerprinting needs care. Raw command output carries timings and temporary paths, so
 hashing it would make every failure look new and oscillation detection would never fire —
 a task stuck on one broken test would burn the whole iteration budget instead of escalating
-in three rounds. The finding therefore carries a *normalised* set of failure lines, with
-numbers and temp paths collapsed, alongside the raw output tail the agent needs to act on.
+in three rounds.
+
+A finding therefore has two parts with different jobs. `Summary` holds a *normalised* set
+of failure lines, with numbers and temporary paths collapsed, and is the only part the
+fingerprint hashes. `Detail` holds the raw output tail the agent needs in order to act, and
+is excluded from the fingerprint. Keeping raw output in `Summary` would defeat the
+normalisation entirely, so the separation is load-bearing rather than cosmetic.
+
+Output is streamed to the step's transcript while the command runs, with only a bounded
+tail retained in memory. Buffering the whole of it would let one command that prints
+continuously exhaust the daemon and take every concurrent task with it; truncating after
+the fact does not help, because the allocation has already happened. The transcript itself
+is capped too, so a runaway command cannot fill the disk.
+
+A passing verify returns an explicit approved verdict rather than an empty result. A nil
+verdict means the harness could not produce a result at all, which is a failure — the same
+invariant as a review, and the reason `true` exiting zero must not be reported as "no
+result".
 
 There are no retries: a non-zero exit is a result, not a transport error, and inferring
 which failures are infrastructural from their text would silently retry genuine test
