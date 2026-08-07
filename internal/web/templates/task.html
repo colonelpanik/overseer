@@ -1,0 +1,76 @@
+{{define "content"}}
+<div class="row" style="margin-bottom:1rem">
+  <span class="badge {{.Badge}}">{{.Task.State}}</span>
+  <span class="meta prog">{{.Progress}}</span>
+  <span class="meta mono">{{.Task.Branch}}</span>
+  <span class="meta">${{printf "%.2f" .Totals.CostUSD}}</span>
+</div>
+
+<h2 style="margin-top:0">{{.Task.Goal}}</h2>
+
+{{if eq .Task.State "escalated"}}
+<div class="banner">
+  <p style="margin:0 0 .6rem"><strong>Parked:</strong> {{.Task.ErrMsg}}</p>
+  <div class="row">
+    <form method="post" action="/task/{{.Task.ID}}/continue">
+      <button class="primary" type="submit">Continue 10 more iterations</button>
+    </form>
+    <form method="post" action="/task/{{.Task.ID}}/abandon">
+      <button type="submit">Abandon</button>
+    </form>
+  </div>
+  <p style="margin:.75rem 0 .3rem" class="meta">Or take it over by hand:</p>
+  <pre>{{.TakeOver}}</pre>
+</div>
+{{else if .Task.ErrMsg}}
+<div class="banner" style="border-color:var(--red)"><p style="margin:0">{{.Task.ErrMsg}}</p></div>
+{{end}}
+
+{{if .Task.PRURL}}<p><a href="{{.Task.PRURL}}">{{.Task.PRURL}}</a></p>{{end}}
+
+<h3>Timeline</h3>
+{{if not .Timeline}}<p class="empty">Nothing has run yet.</p>{{end}}
+{{range .Timeline}}
+<details class="step" {{if eq .Step.State "running"}}open{{end}}>
+  <summary>
+    <span class="agent {{.Step.Agent}}">{{.Step.Agent}}</span>
+    <span class="meta">{{.Step.Phase}} · iteration {{.Step.Iteration}}</span>
+    {{if .Step.Verdict}}<span class="meta mono">{{.Step.Verdict}}</span>{{end}}
+    <span class="meta">{{.Duration}}</span>
+    {{if ne .Step.State "done"}}<span class="badge grey">{{.Step.State}}</span>{{end}}
+  </summary>
+  <div class="body">
+    {{if .Findings}}
+    <ul class="findings">
+      {{range .Findings}}
+      <li>
+        <span class="sev {{.Severity}}">{{.Severity}}</span>
+        {{if .File}}<span class="loc mono">{{.File}}{{if .Line}}:{{.Line}}{{end}}</span> {{end}}
+        {{.Summary}}
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+    {{if .Step.ErrMsg}}<p class="meta">{{.Step.ErrMsg}}</p>{{end}}
+    {{if .Step.TranscriptPath}}
+    <p class="meta"><a href="/task/{{$.Task.ID}}/transcript/{{.Step.ID}}">transcript</a>
+      <span class="mono">{{.Step.TranscriptPath}}</span></p>
+    {{end}}
+  </div>
+</details>
+{{end}}
+
+{{if .PunchList}}
+<h3>Punch list</h3>
+<p class="meta">Findings below this task's blocking threshold. They did not hold up the loop.</p>
+<ul class="findings">
+  {{range .PunchList}}
+  <li>
+    <span class="sev {{.Severity}}">{{.Severity}}</span>
+    {{if .File}}<span class="loc mono">{{.File}}{{if .Line}}:{{.Line}}{{end}}</span> {{end}}
+    {{.Summary}}
+  </li>
+  {{end}}
+</ul>
+{{end}}
+{{end}}
