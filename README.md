@@ -42,12 +42,36 @@ step_timeout: 30m
 blocking_severity: any   # any | minor | major | critical
 sandbox: auto            # auto | bwrap | off
 bwrap_bin: bwrap
+verify_command: ""
 ```
 
 `blocking_severity: any` means every Codex finding, including nits, keeps the
 loop running. That is the strictest setting and the default. If a task starts
 burning iterations on style nits, set `blocking_severity: major` on that task
 in the batch file rather than babysitting it.
+
+## The verify gate
+
+Set `verify_command` (or `verify:` on a single task) and overseer runs it in
+the worktree after every implementation turn. It must exit zero before Codex is
+asked to review, and a non-zero exit is fed back to the same Claude session as a
+critical finding.
+
+    verify_command: go test ./...
+
+This is the only objective signal in the loop. Codex reviews the diff and runs
+read-only, so it cannot execute anything; without a verify command, convergence
+means "Codex stopped objecting", which a project that does not compile can
+satisfy. With one, it means the tests pass as well.
+
+A failing verify always blocks, whatever `blocking_severity` is set to. Failing
+the same way twice escalates the task rather than spending the whole iteration
+budget on it — timings and temporary paths are normalised away first, so "the
+same way" means the same failing tests, not byte-identical output.
+
+Output is streamed to the step transcript as the command runs, with only a
+bounded tail kept in memory for the feedback to the agent, so a command that
+prints continuously cannot exhaust the daemon.
 
 ## When a task parks
 

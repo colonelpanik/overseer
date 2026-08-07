@@ -34,6 +34,10 @@ type Task struct {
 	WorktreeDir  string
 	PRURL        string
 	ErrMsg       string
+	// VerifyCommand is run in the worktree after each implementation turn
+	// and must exit zero before the code review happens. Empty disables the
+	// gate.
+	VerifyCommand string
 	// FindingHashes records the blocking-findings fingerprint seen at each
 	// iteration of the current phase, for oscillation detection.
 	FindingHashes []string
@@ -58,13 +62,13 @@ func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
 		INSERT INTO tasks (slug, repo_path, goal, constraints, state, phase,
 			iteration, max_iterations, blocking_severity, plan_session_id,
 			exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
-			worktree_dir, pr_url, err_msg,
+			worktree_dir, pr_url, err_msg, verify_command,
 			finding_hashes, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Slug, t.RepoPath, t.Goal, t.Constraints, t.State, t.Phase,
 		t.Iteration, t.MaxIterations, t.BlockingSeverity, t.PlanSessionID,
 		t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir, t.GitAdminDir,
-		t.WorktreeDir, t.PRURL, t.ErrMsg,
+		t.WorktreeDir, t.PRURL, t.ErrMsg, t.VerifyCommand,
 		strings.Join(t.FindingHashes, "\n"),
 		t.CreatedAt.Format(rfc3339), t.UpdatedAt.Format(rfc3339))
 	if err != nil {
@@ -81,7 +85,7 @@ func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
 const taskColumns = `id, slug, repo_path, goal, constraints, state, phase,
 	iteration, max_iterations, blocking_severity, plan_session_id,
 	exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
-	worktree_dir, pr_url, err_msg, finding_hashes,
+	worktree_dir, pr_url, err_msg, verify_command, finding_hashes,
 	created_at, updated_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
@@ -91,7 +95,8 @@ func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
 		&t.State, &t.Phase, &t.Iteration, &t.MaxIterations,
 		&t.BlockingSeverity, &t.PlanSessionID, &t.ExecSessionID, &t.Branch,
 		&t.BaseRef, &t.GitCommonDir, &t.GitAdminDir,
-		&t.WorktreeDir, &t.PRURL, &t.ErrMsg, &hashes, &created, &updated)
+		&t.WorktreeDir, &t.PRURL, &t.ErrMsg, &t.VerifyCommand,
+		&hashes, &created, &updated)
 	if err != nil {
 		return Task{}, err
 	}
@@ -161,13 +166,13 @@ func (s *Store) SaveTask(ctx context.Context, t Task) error {
 		UPDATE tasks SET state=?, phase=?, iteration=?, max_iterations=?,
 			blocking_severity=?, plan_session_id=?, exec_session_id=?,
 			branch=?, base_ref=?, git_common_dir=?, git_admin_dir=?,
-			worktree_dir=?, pr_url=?, err_msg=?, finding_hashes=?,
-			updated_at=?
+			worktree_dir=?, pr_url=?, err_msg=?, verify_command=?,
+			finding_hashes=?, updated_at=?
 		WHERE id=?`,
 		t.State, t.Phase, t.Iteration, t.MaxIterations, t.BlockingSeverity,
 		t.PlanSessionID, t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir,
 		t.GitAdminDir, t.WorktreeDir, t.PRURL,
-		t.ErrMsg, strings.Join(t.FindingHashes, "\n"),
+		t.ErrMsg, t.VerifyCommand, strings.Join(t.FindingHashes, "\n"),
 		t.UpdatedAt.Format(rfc3339), t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)

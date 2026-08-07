@@ -129,6 +129,9 @@ func (h *harness) submit(t *testing.T, goal string) store.Task {
 	task, err := h.st.CreateTask(context.Background(), store.Task{
 		Slug: worktree.Slugify(goal), RepoPath: h.repo, Goal: goal,
 		State: string(loop.StateQueued), MaxIterations: 10, BlockingSeverity: "any",
+		// Mirrors Submit's fallback to the daemon default, so tests that set
+		// h.eng.Cfg.VerifyCommand before calling submit exercise the gate.
+		VerifyCommand: h.eng.Cfg.VerifyCommand,
 	})
 	if err != nil {
 		t.Fatal(err)

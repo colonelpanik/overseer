@@ -25,6 +25,11 @@ type Config struct {
 	CodexBin         string        `yaml:"codex_bin"`
 	GhBin            string        `yaml:"gh_bin"`
 
+	// VerifyCommand is run in the worktree after each implementation turn and
+	// must exit zero before the code review happens. Empty disables the gate,
+	// which leaves convergence meaning only that Codex stopped objecting.
+	VerifyCommand string `yaml:"verify_command"`
+
 	// Sandbox is auto, bwrap or off. auto uses bwrap when it works and
 	// warns loudly when it does not.
 	Sandbox  string `yaml:"sandbox"`

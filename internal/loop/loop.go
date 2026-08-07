@@ -22,6 +22,9 @@ const (
 	StatePlanning   State = "planning"
 	StatePlanReview State = "plan_review"
 	StateExecuting  State = "executing"
+	// StateVerifying runs the project's own check — the only objective
+	// signal in a loop otherwise made of model judgement.
+	StateVerifying  State = "verifying"
 	StateCodeReview State = "code_review"
 	StateFinishing  State = "finishing"
 	StateDone       State = "done"
@@ -48,6 +51,7 @@ const (
 	ActCodexPlanReview  ActionKind = "codex_plan_review"
 	ActClaudeExec       ActionKind = "claude_exec"
 	ActClaudeExecResume ActionKind = "claude_exec_resume"
+	ActVerify           ActionKind = "verify"
 	ActCodexCodeReview  ActionKind = "codex_code_review"
 	ActFinish           ActionKind = "finish"
 	ActEscalate         ActionKind = "escalate"
@@ -66,6 +70,9 @@ type Task struct {
 	BlockingSeverity string
 	PlanSessionID    string
 	ExecSessionID    string
+	// Verify is true when a verify command is configured. Without one the
+	// gate is skipped and convergence keeps its weaker, review-only meaning.
+	Verify bool
 	// FindingHashes holds one fingerprint per completed iteration of the
 	// current phase. It is cleared on every phase change.
 	FindingHashes []string
@@ -134,11 +141,18 @@ func Next(t Task, last *Outcome) (Action, Task) {
 		if last != nil && last.SessionID != "" {
 			next.ExecSessionID = last.SessionID
 		}
+		if t.Verify {
+			next.State = StateVerifying
+			return Action{Kind: ActVerify}, next
+		}
 		next.State = StateCodeReview
 		return Action{Kind: ActCodexCodeReview}, next
 
 	case StatePlanReview:
 		return afterReview(t, next, last, PhasePlan)
+
+	case StateVerifying:
+		return afterVerify(t, next, last)
 
 	case StateCodeReview:
 		return afterReview(t, next, last, PhaseExec)
@@ -198,6 +212,51 @@ func afterReview(t, next Task, last *Outcome, phase Phase) (Action, Task) {
 			Findings:        blocking,
 		}, next
 	}
+	next.State = StateExecuting
+	return Action{
+		Kind:            ActClaudeExecResume,
+		ResumeSessionID: t.ExecSessionID,
+		Findings:        blocking,
+	}, next
+}
+
+// afterVerify decides what a completed verify run means.
+//
+// A pass costs no iteration: the work is unchanged, and the review has not
+// run yet. A failure spends one, because fixing it needs another agent turn.
+func afterVerify(t, next Task, last *Outcome) (Action, Task) {
+	if last == nil || last.Verdict == nil {
+		// Nothing to read is never a pass, exactly as for a review.
+		next.State = StateFailed
+		next.ErrMsg = "verify produced no result"
+		return Action{Kind: ActFail, Reason: next.ErrMsg}, next
+	}
+
+	// Verify findings are always critical, so they block at every threshold:
+	// a failing build must not be waved through because the operator relaxed
+	// the review threshold.
+	blocking := last.Verdict.Blocking("any")
+	if len(blocking) == 0 {
+		next.State = StateCodeReview
+		return Action{Kind: ActCodexCodeReview}, next
+	}
+
+	fingerprint := last.Verdict.Fingerprint("any")
+	if slices.Contains(t.FindingHashes, fingerprint) {
+		next.State = StateEscalated
+		reason := fmt.Sprintf("verify keeps failing the same way at iteration %d", t.Iteration)
+		next.ErrMsg = reason
+		return Action{Kind: ActEscalate, Reason: reason, Findings: blocking}, next
+	}
+	if t.Iteration >= t.MaxIterations {
+		next.State = StateEscalated
+		reason := fmt.Sprintf("hit the %d-iteration cap with verify still failing", t.MaxIterations)
+		next.ErrMsg = reason
+		return Action{Kind: ActEscalate, Reason: reason, Findings: blocking}, next
+	}
+
+	next.FindingHashes = append(next.FindingHashes, fingerprint)
+	next.Iteration = t.Iteration + 1
 	next.State = StateExecuting
 	return Action{
 		Kind:            ActClaudeExecResume,
@@ -269,6 +328,9 @@ func Pending(t Task) (Action, bool) {
 			return Action{Kind: ActClaudeExec}, true
 		}
 		return Action{Kind: ActClaudeExecResume, ResumeSessionID: t.ExecSessionID}, true
+
+	case StateVerifying:
+		return Action{Kind: ActVerify}, true
 
 	case StateCodeReview:
 		return Action{Kind: ActCodexCodeReview}, true

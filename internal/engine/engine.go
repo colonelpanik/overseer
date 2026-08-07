@@ -318,6 +318,9 @@ func (e *Engine) dispatch(ctx context.Context, task *store.Task, action loop.Act
 		return e.runClaude(ctx, task, "exec",
 			ReviseWithFindingsPrompt("the code", action.Findings), action.ResumeSessionID)
 
+	case loop.ActVerify:
+		return e.runVerify(ctx, task)
+
 	case loop.ActCodexPlanReview:
 		return e.runCodex(ctx, task, "plan", PlanReviewPrompt(task.Goal))
 
@@ -789,6 +792,7 @@ func toLoop(t store.Task) loop.Task {
 		BlockingSeverity: t.BlockingSeverity,
 		PlanSessionID:    t.PlanSessionID,
 		ExecSessionID:    t.ExecSessionID,
+		Verify:           t.VerifyCommand != "",
 		FindingHashes:    t.FindingHashes,
 		ErrMsg:           t.ErrMsg,
 	}

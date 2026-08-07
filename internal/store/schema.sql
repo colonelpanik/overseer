@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     worktree_dir      TEXT NOT NULL DEFAULT '',
     pr_url            TEXT NOT NULL DEFAULT '',
     err_msg           TEXT NOT NULL DEFAULT '',
+    verify_command    TEXT NOT NULL DEFAULT '',
     finding_hashes    TEXT NOT NULL DEFAULT '',
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL

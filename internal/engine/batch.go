@@ -24,6 +24,9 @@ type BatchTask struct {
 	Goal             string   `yaml:"goal"`
 	Constraints      []string `yaml:"constraints"`
 	BlockingSeverity string   `yaml:"blocking_severity"`
+	// Verify overrides the daemon's verify_command for this task. Empty
+	// falls back to the daemon default.
+	Verify string `yaml:"verify"`
 }
 
 // Batch is a submitted task file. It carries tasks only: daemon settings
@@ -86,6 +89,10 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 	if severity == "" {
 		severity = e.Cfg.BlockingSeverity
 	}
+	verify := bt.Verify
+	if verify == "" {
+		verify = e.Cfg.VerifyCommand
+	}
 
 	base := worktree.Slugify(bt.Goal)
 	task := store.Task{
@@ -95,6 +102,7 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 		State:            string(loop.StateQueued),
 		MaxIterations:    e.Cfg.MaxIterations,
 		BlockingSeverity: severity,
+		VerifyCommand:    verify,
 	}
 
 	// Slugs are unique because they name a branch and a directory. Suffix on
