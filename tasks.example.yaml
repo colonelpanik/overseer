@@ -1,0 +1,17 @@
+# Submit with: overseer submit tasks.example.yaml
+#
+# Daemon settings (max_parallel, max_iterations, step_timeout,
+# blocking_severity) live in ~/.overseer/config.yaml, not here — so
+# submitting a batch cannot change the behaviour of a run already going.
+tasks:
+  - repo: /home/kal/code/dc-planner
+    goal: |
+      Add CSV export to the rack inventory view.
+    constraints:
+      - Server-rendered, no new JS dependencies
+      - Follow the existing repo_*.go pattern in internal/store
+
+  - repo: /home/kal/code/clanker
+    goal: Replace the hand-rolled retry logic with a shared backoff helper.
+    # Nits will not hold this one up.
+    blocking_severity: major
