@@ -69,6 +69,13 @@ func TestParseClaudeStreamFixture(t *testing.T) {
 	if res.ErrMsg != "" {
 		t.Errorf("successful result has ErrMsg %q", res.ErrMsg)
 	}
+	// The recorded fixture's rate_limit_event carries status "allowed" — the
+	// one case that must NOT populate ErrMsg. Without this assertion, the
+	// "allowed" half of the not-equal-to-"allowed" check is never exercised
+	// by the fixture at all.
+	if rl := events[4]; rl.Kind == EventRateLimit && rl.ErrMsg != "" {
+		t.Errorf("allowed rate-limit event has ErrMsg %q, want empty", rl.ErrMsg)
+	}
 }
 
 func TestParseClaudeErrorResult(t *testing.T) {
@@ -85,6 +92,36 @@ func TestParseClaudeErrorResult(t *testing.T) {
 	}
 }
 
+// TestParseClaudeErrorResultIsErrorAlone proves the OR half of "is_error OR
+// subtype != success" that TestParseClaudeErrorResult cannot: it sets
+// is_error true together with the "success" subtype, so an accidental `&&`
+// (which TestParseClaudeErrorResult alone would not catch, since it sets
+// both bad conditions at once) would wrongly leave ErrMsg empty here.
+func TestParseClaudeErrorResultIsErrorAlone(t *testing.T) {
+	line := `{"type":"result","subtype":"success","is_error":true,"session_id":"s1","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}`
+	ev, err := ParseClaudeLine([]byte(line))
+	if err != nil {
+		t.Fatalf("ParseClaudeLine: %v", err)
+	}
+	if ev.ErrMsg == "" {
+		t.Error("is_error:true must populate ErrMsg even with subtype \"success\"")
+	}
+}
+
+// TestParseClaudeErrorResultSubtypeAlone is the other OR half: is_error is
+// false but the subtype is not "success". An accidental `&&` would also
+// wrongly leave ErrMsg empty here.
+func TestParseClaudeErrorResultSubtypeAlone(t *testing.T) {
+	line := `{"type":"result","subtype":"error_during_execution","is_error":false,"session_id":"s1","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}`
+	ev, err := ParseClaudeLine([]byte(line))
+	if err != nil {
+		t.Fatalf("ParseClaudeLine: %v", err)
+	}
+	if ev.ErrMsg == "" {
+		t.Error("subtype != \"success\" must populate ErrMsg even with is_error:false")
+	}
+}
+
 func TestParseClaudeRateLimitExhausted(t *testing.T) {
 	line := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour"},"session_id":"s1"}`
 	ev, err := ParseClaudeLine([]byte(line))
@@ -96,6 +133,22 @@ func TestParseClaudeRateLimitExhausted(t *testing.T) {
 	}
 	if ev.ErrMsg == "" {
 		t.Error("non-allowed rate limit status must populate ErrMsg")
+	}
+}
+
+func TestParseClaudeRateLimitAllowed(t *testing.T) {
+	// The other half of the not-equal-to-"allowed" check, isolated from the
+	// fixture: an explicit "allowed" status must leave ErrMsg empty.
+	line := `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"},"session_id":"s1"}`
+	ev, err := ParseClaudeLine([]byte(line))
+	if err != nil {
+		t.Fatalf("ParseClaudeLine: %v", err)
+	}
+	if ev.Kind != EventRateLimit {
+		t.Fatalf("Kind = %q, want EventRateLimit", ev.Kind)
+	}
+	if ev.ErrMsg != "" {
+		t.Errorf("allowed rate limit status has ErrMsg %q, want empty", ev.ErrMsg)
 	}
 }
 

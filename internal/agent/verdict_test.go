@@ -183,6 +183,48 @@ func assertAllPropsRequired(t *testing.T, node map[string]any, path string) {
 	}
 }
 
+func TestVerdictMarshalsWithLowercaseKeys(t *testing.T) {
+	// Nothing marshals a Verdict today, but the spec promised json:"verdict"
+	// and json:"findings" — the same convention Finding already follows on
+	// this file. Without struct tags, encoding/json falls back to the Go
+	// field names and any later caller that persists or logs a Verdict would
+	// silently get "Verdict"/"Findings" keys instead.
+	v := Verdict{Verdict: "approved", Findings: []Finding{
+		{Severity: SevMinor, Summary: "s"},
+	}}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, ok := m["verdict"]; !ok {
+		t.Errorf("marshaled Verdict missing lowercase %q key; got %s", "verdict", b)
+	}
+	if _, ok := m["findings"]; !ok {
+		t.Errorf("marshaled Verdict missing lowercase %q key; got %s", "findings", b)
+	}
+	if _, ok := m["Verdict"]; ok {
+		t.Errorf("marshaled Verdict has untagged %q key; got %s", "Verdict", b)
+	}
+	if _, ok := m["Findings"]; ok {
+		t.Errorf("marshaled Verdict has untagged %q key; got %s", "Findings", b)
+	}
+
+	// ParseVerdict decodes through the separate verdictWire struct, so the
+	// tags above must be inert to it — round-trip through the real parser to
+	// prove that.
+	round, err := ParseVerdict(b)
+	if err != nil {
+		t.Fatalf("ParseVerdict(marshaled Verdict): %v", err)
+	}
+	if round.Verdict != v.Verdict || len(round.Findings) != len(v.Findings) {
+		t.Errorf("round-tripped verdict = %+v, want %+v", round, v)
+	}
+}
+
 func TestFingerprintIgnoresDetail(t *testing.T) {
 	// Detail exists to hold volatile content — command output, timings — that
 	// must not perturb the fingerprint. If it were hashed, a repeated failure

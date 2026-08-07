@@ -313,14 +313,26 @@ func TestRunTaskRetriesRetryableErrorWithoutSpendingAnIteration(t *testing.T) {
 	// directory — the task worktree, which is writable for claude both with
 	// and without the sandbox — rather than an arbitrary host temp dir a
 	// sandboxed agent would have no access to.
+	//
+	// The failing first attempt prints its own "result" event with non-zero
+	// usage before exiting 1: the failure is still detected from the exit
+	// code and stderr text (retryable, via "429 too many requests"), but the
+	// attempt genuinely spent tokens on the way to failing. If the engine
+	// ever regresses to recording only the last attempt's usage, this
+	// attempt's 40/20 tokens and $0.05 would silently vanish from the step
+	// total instead of being added to the second attempt's 5/2 and $0.01.
 	claude := writeScript(t, "claude", `
 n=0
 [ -f n ] && n=$(cat n)
 n=$((n+1)); echo $n > n
-if [ "$n" = "1" ]; then echo '429 Too Many Requests' >&2; exit 1; fi
+if [ "$n" = "1" ]; then
+  echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude-sess","total_cost_usd":0.05,"usage":{"input_tokens":40,"output_tokens":20}}'
+  echo '429 Too Many Requests' >&2
+  exit 1
+fi
 echo '{"type":"system","subtype":"init","session_id":"claude-sess"}'
 echo '# plan' > PLAN.md
-echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude-sess","total_cost_usd":0,"usage":{"input_tokens":1,"output_tokens":1}}'
+echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude-sess","total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":2}}'
 `)
 	h := newHarness(t, claude, fakeCodex(t, `{"verdict":"approved","findings":[]}`))
 	h.eng.RetryBackoff = time.Millisecond
@@ -336,6 +348,25 @@ echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude
 	}
 	if got.State != string(loop.StateDone) {
 		t.Fatalf("State = %q (err %q), want done after a retry", got.State, got.ErrMsg)
+	}
+
+	steps, err := h.st.ListSteps(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) == 0 || steps[0].Agent != "claude" || steps[0].Phase != "plan" {
+		t.Fatalf("steps[0] = %+v, want the retried claude plan step", steps)
+	}
+	plan := steps[0]
+	const wantInput, wantOutput = 40 + 5, 20 + 2
+	const wantCost = 0.05 + 0.01
+	if plan.InputTokens != wantInput || plan.OutputTokens != wantOutput {
+		t.Errorf("plan step tokens = (%d,%d), want (%d,%d) — the failing attempt's usage "+
+			"must be summed in, not dropped in favour of the last attempt alone",
+			plan.InputTokens, plan.OutputTokens, wantInput, wantOutput)
+	}
+	if diff := plan.CostUSD - wantCost; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("plan step cost = %v, want %v summed across both attempts", plan.CostUSD, wantCost)
 	}
 }
 
@@ -554,5 +585,72 @@ func TestOnChangeFiresForEveryTransition(t *testing.T) {
 	}
 	if n < 5 {
 		t.Errorf("OnChange fired %d times, want at least one per transition", n)
+	}
+}
+
+func TestFailTaskClosesOutAGenuineHarnessError(t *testing.T) {
+	// No test elsewhere makes dispatch return a real Go error: Runner.Run
+	// converts every process-level failure into Result.ErrMsg instead, so a
+	// gutted failTask (e.g. reduced to a bare `return nil`) would still pass
+	// the whole suite. This test forces the one kind of error dispatch can
+	// still surface: a harness-level failure to even write the transcript.
+	//
+	// The first claude plan step always writes to
+	// "<rundir>/plan-1-claude.jsonl". Pre-creating a directory at that exact
+	// path makes Runner.Run's os.OpenFile fail with "is a directory" — a
+	// genuine error, not an agent failure — after the step has already been
+	// recorded as "running" in the store. That is exactly the situation
+	// failTask exists to clean up: without it, the step would stay "running"
+	// forever and the task would stay in a non-terminal state, so the
+	// scheduler would re-claim and retry it every poll indefinitely.
+	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	task := h.submit(t, "Harness error")
+	runDir := filepath.Join(h.eng.Cfg.RunsDir(), task.Slug)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(runDir, "plan-1-claude.jsonl")
+	if err := os.Mkdir(transcript, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.eng.RunTask(ctx, task.ID); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != string(loop.StateFailed) {
+		t.Fatalf("State = %q, want failed", got.State)
+	}
+	if !strings.Contains(got.ErrMsg, "transcript") {
+		t.Errorf("ErrMsg = %q, want it to record the harness failure", got.ErrMsg)
+	}
+
+	claimable, err := h.st.ClaimableTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ct := range claimable {
+		if ct.ID == task.ID {
+			t.Errorf("task %d still claimable after a harness error; scheduler would retry it forever", task.ID)
+		}
+	}
+
+	steps, err := h.st.ListSteps(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) == 0 {
+		t.Fatal("expected a step to have been started before the harness error hit")
+	}
+	for _, s := range steps {
+		if s.State == "running" {
+			t.Errorf("step %d left in state %q, want it closed out", s.ID, s.State)
+		}
 	}
 }

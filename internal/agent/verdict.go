@@ -96,8 +96,8 @@ func (f Finding) LineOrZero() int {
 
 // Verdict is Codex's structured review result.
 type Verdict struct {
-	Verdict  string
-	Findings []Finding
+	Verdict  string    `json:"verdict"`
+	Findings []Finding `json:"findings"`
 }
 
 // verdictWire decodes the response with field presence distinguishable from
