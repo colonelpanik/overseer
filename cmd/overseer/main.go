@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"overseer/internal/config"
 	"overseer/internal/engine"
@@ -89,6 +90,21 @@ func open(cfg config.Config) (*store.Store, *engine.Engine, error) {
 	return st, eng, nil
 }
 
+// shutdownGrace bounds how long cmdServe waits for the web server and the
+// engine loop to unwind after ctx is cancelled, before giving up and
+// returning anyway.
+//
+// A step can legitimately run up to the 30-minute step timeout, but that
+// timeout is itself a child of the same ctx (see agent.Runner.Run), so
+// cancellation kills the in-flight agent subprocess with SIGKILL almost
+// immediately; what's left to wait for is local bookkeeping (marking the
+// interrupted step, one more SaveTask, the HTTP server's own Close) which
+// normally finishes in well under a second. 10s leaves generous headroom for
+// a slow disk without making an operator sit through anything resembling the
+// step timeout. If it isn't enough, something is genuinely stuck, and the
+// next `overseer serve`'s Recover() cleans up the interrupted step anyway.
+const shutdownGrace = 10 * time.Second
+
 func cmdServe(cfg config.Config) error {
 	st, eng, err := open(cfg)
 	if err != nil {
@@ -109,12 +125,63 @@ func cmdServe(cfg config.Config) error {
 	go func() { errc <- eng.Run(ctx) }()
 
 	fmt.Printf("overseer listening on http://%s\n", cfg.ListenAddr)
+
+	// Both goroutines run their own graceful shutdown once ctx is cancelled:
+	// the server closes its listener, and eng.Run drains in-flight RunTask
+	// goroutines with wg.Wait(). Returning as soon as ctx.Done() fires -- or
+	// as soon as one of them errors -- without waiting for that drain would
+	// let the deferred stop()/st.Close() above race it, closing the database
+	// out from under a task that is still mid-SaveTask. awaitWorkers makes
+	// sure both have actually finished (or the grace period has expired)
+	// before this function, and therefore the deferred cleanup, returns.
+	pending := 2
+	var firstErr error
 	select {
 	case <-ctx.Done():
-		return nil
+		// Interrupted: let both goroutines' own shutdown paths run and wait
+		// for them below.
 	case err := <-errc:
-		return err
+		// One exited on its own before any signal -- a real failure, such as
+		// the listen address already being in use. Cancel ctx so the other
+		// goroutine unwinds too, then still wait for it rather than racing
+		// it out from under the deferred cleanup.
+		firstErr = err
+		pending--
+		stop()
 	}
+
+	if err := awaitWorkers(errc, pending, shutdownGrace); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// awaitWorkers waits for pending more results on done, returning the first
+// non-nil error reported. If grace elapses before all of them report, it
+// gives up and returns promptly with an error describing the abandoned
+// drain instead of blocking indefinitely.
+func awaitWorkers(done <-chan error, pending int, grace time.Duration) error {
+	if pending <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	var firstErr error
+	for pending > 0 {
+		select {
+		case err := <-done:
+			pending--
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+		case <-timer.C:
+			return fmt.Errorf(
+				"shutdown: gave up waiting for %d background worker(s) to finish draining after %s; any interrupted step will be recovered on the next `overseer serve`",
+				pending, grace)
+		}
+	}
+	return firstErr
 }
 
 func cmdSubmit(cfg config.Config, path string) error {

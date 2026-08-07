@@ -152,6 +152,20 @@ func hasRemote(ctx context.Context, repoPath, name string) bool {
 	return false
 }
 
+// remoteRefMissing reports whether a `git fetch` failure means the ref
+// simply does not exist yet on an otherwise-healthy, reachable remote --
+// e.g. a brand-new repository that just had origin added, with nothing
+// pushed -- as opposed to the remote being unreachable at all (bad host,
+// auth failure, deleted repository, protocol mismatch, shallow-fetch
+// trouble). Both cases exit git with status 128, so the exit code cannot
+// tell them apart; git's own wording can. "couldn't find remote ref" is
+// specific to a missing ref, and every other fatal fetch error is spelled
+// differently (e.g. "Could not read from remote repository", "Could not
+// resolve host", "Permission denied").
+func remoteRefMissing(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "couldn't find remote ref")
+}
+
 // DefaultBranch reports the repository's default branch, preferring what
 // origin advertises and falling back to the current branch for repos with
 // no remote.
@@ -197,16 +211,26 @@ func (m *Manager) Create(ctx context.Context, repoPath, slug string) (Worktree, 
 
 	baseRef := "origin/" + base
 	if _, err := git(ctx, repoPath, "fetch", "origin", base); err != nil {
-		if probe.hasOrigin {
-			// A remote is configured but could not be reached. Falling back
-			// to the local branch here would run the whole plan/execute
-			// loop against a stale or diverged base and only fail much
-			// later, at Push; fail loudly now instead, at the cheapest
-			// possible point.
+		switch {
+		case remoteRefMissing(err):
+			// The remote is healthy and reachable; it simply does not have
+			// this ref yet -- e.g. a brand-new repository that just had
+			// origin added, with nothing pushed. That is exactly the
+			// legitimate case the local fallback exists for, so fall back
+			// quietly rather than misreporting a fine remote as unreachable.
+			baseRef = base
+		case probe.hasOrigin:
+			// A remote is configured but a fetch against it failed for some
+			// other reason: unreachable host, auth failure, protocol
+			// mismatch, shallow-fetch trouble, etc. Falling back to the
+			// local branch here would run the whole plan/execute loop
+			// against a stale or diverged base and only fail much later, at
+			// Push; fail loudly now instead, at the cheapest possible point.
 			return Worktree{}, fmt.Errorf("fetch origin %s: remote is configured but unreachable: %w", base, err)
+		default:
+			// No remote at all is a legitimate offline repository.
+			baseRef = base
 		}
-		// No remote at all is a legitimate offline repository.
-		baseRef = base
 	} else if _, err := git(ctx, repoPath, "rev-parse", "--verify", baseRef); err != nil {
 		baseRef = base
 	}

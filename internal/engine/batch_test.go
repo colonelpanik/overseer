@@ -52,6 +52,28 @@ func TestParseBatchRejectsMissingFields(t *testing.T) {
 	}
 }
 
+func TestParseBatchReportsEmptyDocumentAsNoTasks(t *testing.T) {
+	// gopkg.in/yaml.v3 decodes a document with no YAML content at all to
+	// io.EOF rather than a nil error with a zero-value Batch, unlike
+	// "tasks: []" which decodes cleanly and is only caught by the
+	// len(b.Tasks) == 0 check. ParseBatch has a guard translating that EOF
+	// into the same "no tasks" error; without it this must not crash or be
+	// silently accepted.
+	for name, raw := range map[string]string{
+		"completely empty":             "",
+		"whitespace only (no content)": "   \n\n   \n",
+	} {
+		_, err := ParseBatch([]byte(raw))
+		if err == nil {
+			t.Errorf("%s: expected an error, got none", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "no tasks") {
+			t.Errorf("%s: err = %q, want it to mention \"no tasks\"", name, err)
+		}
+	}
+}
+
 func TestParseBatchRejectsMaxParallel(t *testing.T) {
 	// max_parallel is daemon config; accepting it in a batch would let a
 	// second submit change a run already in flight.

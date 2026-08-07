@@ -47,6 +47,31 @@ func newRepoWithRemote(t *testing.T) string {
 	return work
 }
 
+// newRepoWithUnpushedRemote creates a repo on branch main with one commit and
+// an "origin" remote that is healthy and reachable but has nothing pushed to
+// it yet -- the state right after `git remote add origin <url>` on a
+// brand-new project, before the first push.
+func newRepoWithUnpushedRemote(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	bare := filepath.Join(base, "remote.git")
+	work := filepath.Join(base, "work")
+
+	gitRun(t, base, "init", "--bare", "--initial-branch=main", bare)
+	gitRun(t, base, "init", "--initial-branch=main", work)
+	gitRun(t, work, "config", "user.name", "test")
+	gitRun(t, work, "config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(work, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, work, "add", ".")
+	gitRun(t, work, "commit", "-m", "initial")
+	gitRun(t, work, "remote", "add", "origin", bare)
+	// Deliberately no push: origin is reachable but has no refs at all yet.
+	return work
+}
+
 func TestSlugify(t *testing.T) {
 	cases := map[string]string{
 		"Add CSV export to the rack view": "add-csv-export-to-the-rack-view",
@@ -130,6 +155,30 @@ func TestCreateFailsLoudlyWhenTheConfiguredRemoteIsUnreachable(t *testing.T) {
 
 	if _, err := m.Create(ctx, repo, "broken-remote"); err == nil {
 		t.Fatal("Create must fail when the configured remote cannot be reached, not silently fall back to the local branch")
+	}
+}
+
+func TestCreateFallsBackToLocalBranchWhenRemoteHasNoRefsYet(t *testing.T) {
+	// A brand-new repository that just had `origin` added has a perfectly
+	// healthy, reachable remote -- it simply has no branches pushed to it
+	// yet. `git fetch origin main` fails there with "couldn't find remote
+	// ref main" (exit 128), and that must not be confused with the remote
+	// being unreachable: that would hard-fail a completely normal
+	// first-task-in-a-new-repo workflow that used to work before fetch
+	// failures were promoted to hard errors.
+	ctx := context.Background()
+	repo := newRepoWithUnpushedRemote(t)
+	m := NewManager(t.TempDir())
+
+	wt, err := m.Create(ctx, repo, "first-task")
+	if err != nil {
+		t.Fatalf("Create must fall back to the local branch, not fail: %v", err)
+	}
+	if wt.BaseRef != "main" {
+		t.Errorf("BaseRef = %q, want the local branch %q (origin has no refs yet)", wt.BaseRef, "main")
+	}
+	if _, err := os.Stat(filepath.Join(wt.Dir, "README.md")); err != nil {
+		t.Errorf("worktree does not contain the repo contents: %v", err)
 	}
 }
 
