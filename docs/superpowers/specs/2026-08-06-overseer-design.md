@@ -285,8 +285,19 @@ the branch is kept.
    self-contradictory rather than converging on it.
 2. **Agent process failure.** Retryable causes (rate limit, network, 5xx) get exponential
    backoff up to 3 attempts and **do not count against the iteration cap**.
-   Authentication failure pauses the entire run with a banner, since every task would
-   fail identically.
+
+   A process that fails to *start* — a missing or non-executable binary — is reported as a
+   failed result, not as an internal error. This distinction is load-bearing: an error
+   return leaves the engine unable to close the step or move the task out of a
+   non-terminal state, and the scheduler then re-claims it on every poll, retrying forever
+   and adding a `running` step row each time. For the same reason, any genuine harness
+   failure during dispatch is persisted as a task failure rather than merely returned.
+
+   Authentication failure pauses the entire run with a banner, since every task would fail
+   identically. The pause is checked before *every* dispatch, not only when a task starts:
+   with several tasks in flight, one worker can pause the run while others are mid-step,
+   and those must stop at their next boundary rather than continue. A paused task keeps its
+   state and resumes from its pending action when the operator clears the pause.
 3. **Oscillation.** Hash the blocking-findings set on each iteration and compare it against
    every earlier iteration of the same phase. A repeat means Claude is not making progress
    on that finding, so the task escalates immediately rather than burning through to
@@ -304,7 +315,16 @@ the branch is kept.
 
    Re-dispatch means every action must tolerate being repeated. Agent turns are naturally
    safe — a repeated plan turn overwrites `PLAN.md`, a repeated review costs one review.
-   Finishing is the exception, because a task only becomes `done` after `finish` returns:
+
+   Worktree setup needs help to be safe. A task reaches the `worktree` state before setup
+   runs, so a crash between `git worktree add` succeeding and the paths being persisted
+   leaves a perfectly good worktree that the next attempt cannot create again. Setup
+   therefore adopts an existing directory when it is already checked out on the expected
+   branch, preserving any work in it. A directory that exists but is *not* that worktree is
+   a loud error: adopting it would be wrong and deleting it worse.
+
+   Finishing is the other exception, because a task only becomes `done` after `finish`
+   returns:
    a crash in that window would otherwise re-run `finish` against an already-pushed branch
    and an already-removed worktree, and fail a task that had in fact succeeded. Two things
    make the repeat safe: `finish` returns early when the task already records a PR URL, and
