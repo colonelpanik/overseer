@@ -18,7 +18,10 @@ type Step struct {
 	// Provider is the configured provider that served this step. It is what
 	// tells subscription-covered CLI usage apart from usage metered against an
 	// endpoint the operator supplied, after the fact.
-	Provider       string
+	Provider string
+	// RunSeq is which attempt of the task this step belongs to, so a restarted
+	// task's history stays separable from the attempt before it.
+	RunSeq         int
 	State          string
 	StartedAt      time.Time
 	EndedAt        time.Time
@@ -57,11 +60,11 @@ func (s *Store) StartStep(ctx context.Context, st Step) (Step, error) {
 	st.State = "running"
 	st.StartedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO steps (task_id, phase, iteration, agent, provider, state,
-			started_at, transcript_path)
-		VALUES (?,?,?,?,?,?,?,?)`,
-		st.TaskID, st.Phase, st.Iteration, st.Agent, st.Provider, st.State,
-		st.StartedAt.Format(rfc3339), st.TranscriptPath)
+		INSERT INTO steps (task_id, phase, iteration, agent, provider, run_seq,
+			state, started_at, transcript_path)
+		VALUES (?,?,?,?,?,?,?,?,?)`,
+		st.TaskID, st.Phase, st.Iteration, st.Agent, st.Provider, st.RunSeq,
+		st.State, st.StartedAt.Format(rfc3339), st.TranscriptPath)
 	if err != nil {
 		return Step{}, fmt.Errorf("insert step: %w", err)
 	}
@@ -114,9 +117,9 @@ func (s *Store) FinishStep(ctx context.Context, st Step, findings []Finding) err
 	return tx.Commit()
 }
 
-const stepColumns = `id, task_id, phase, iteration, agent, provider, state,
-	started_at, ended_at, exit_code, verdict, input_tokens, output_tokens,
-	cost_usd, transcript_path, err_msg`
+const stepColumns = `id, task_id, phase, iteration, agent, provider, run_seq,
+	state, started_at, ended_at, exit_code, verdict, input_tokens,
+	output_tokens, cost_usd, transcript_path, err_msg`
 
 // ListSteps returns a task's steps in chronological order.
 func (s *Store) ListSteps(ctx context.Context, taskID int64) ([]Step, error) {
@@ -132,9 +135,9 @@ func (s *Store) ListSteps(ctx context.Context, taskID int64) ([]Step, error) {
 		var st Step
 		var started, ended string
 		if err := rows.Scan(&st.ID, &st.TaskID, &st.Phase, &st.Iteration,
-			&st.Agent, &st.Provider, &st.State, &started, &ended, &st.ExitCode,
-			&st.Verdict, &st.InputTokens, &st.OutputTokens, &st.CostUSD,
-			&st.TranscriptPath, &st.ErrMsg); err != nil {
+			&st.Agent, &st.Provider, &st.RunSeq, &st.State, &started, &ended,
+			&st.ExitCode, &st.Verdict, &st.InputTokens, &st.OutputTokens,
+			&st.CostUSD, &st.TranscriptPath, &st.ErrMsg); err != nil {
 			return nil, fmt.Errorf("scan step: %w", err)
 		}
 		st.StartedAt, err = time.Parse(rfc3339, started)
@@ -376,6 +379,27 @@ func (s *Store) FailRunningSteps(ctx context.Context, taskID int64, msg string) 
 		time.Now().UTC().Format(rfc3339), msg, taskID)
 	if err != nil {
 		return 0, fmt.Errorf("fail running steps: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return int(n), nil
+}
+
+// InterruptTaskSteps closes one task's still-running steps as interrupted.
+//
+// Used when the operator stops a task. The step did not fail — it was taken
+// away mid-run — and "interrupted" is the word Recover already uses for exactly
+// that. Leaving it "running" is what makes the dashboard show a live pane that
+// never resolves, and unlike a crash there is no restart coming to sweep it.
+func (s *Store) InterruptTaskSteps(ctx context.Context, taskID int64, msg string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE steps SET state='interrupted', ended_at=?, err_msg=?
+		WHERE task_id = ? AND state='running'`,
+		time.Now().UTC().Format(rfc3339), msg, taskID)
+	if err != nil {
+		return 0, fmt.Errorf("interrupt steps for task %d: %w", taskID, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
