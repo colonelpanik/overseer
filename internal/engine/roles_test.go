@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"overseer/internal/config"
+	"overseer/internal/sandbox"
 	"overseer/internal/store"
 )
 
@@ -238,3 +239,65 @@ func containsArg(args []string, want string) bool {
 	}
 	return false
 }
+
+// The agent CLIs sandbox their own shell tool, and a sandbox inside a sandbox
+// is refused on kernels that gate unprivileged user namespaces behind an
+// AppArmor profile. Telling the agent it is already confined stops it trying —
+// and stops "bwrap: No permissions to create a new namespace" appearing in
+// every transcript as if overseer's own sandbox were broken.
+func TestConfinedAgentsAreToldTheyAreAlreadySandboxed(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	role, err := h.eng.resolveRole(config.RoleCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h.eng.Sandbox = fakeWrapper{name: "bwrap"}
+	if got := h.eng.agentEnv(role)["CLAUDE_CODE_SANDBOXED"]; got != "1" {
+		t.Errorf("CLAUDE_CODE_SANDBOXED = %q, want 1 when overseer is confining the agent", got)
+	}
+}
+
+// With the sandbox off the agent's own is the only one there is. Claiming
+// otherwise turns a deliberate "no sandbox" into an unprotected agent that
+// believes it is protected.
+func TestUnconfinedAgentsAreNotToldTheyAreSandboxed(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	role, err := h.eng.resolveRole(config.RoleCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h.eng.Sandbox = sandbox.Passthrough{}
+	if _, ok := h.eng.agentEnv(role)["CLAUDE_CODE_SANDBOXED"]; ok {
+		t.Error("an unsandboxed agent was told it is already confined")
+	}
+	h.eng.Sandbox = nil
+	if _, ok := h.eng.agentEnv(role)["CLAUDE_CODE_SANDBOXED"]; ok {
+		t.Error("an agent with no wrapper at all was told it is already confined")
+	}
+}
+
+// agentEnv must not write through to the role's own map, which resolveRole
+// hands out fresh per call but which callers may hold.
+func TestAgentEnvDoesNotMutateTheRolesMap(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	role, err := h.eng.resolveRole(config.RoleCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.eng.Sandbox = fakeWrapper{name: "bwrap"}
+	h.eng.agentEnv(role)
+	if _, ok := role.Env["CLAUDE_CODE_SANDBOXED"]; ok {
+		t.Error("agentEnv wrote into the role's environment map")
+	}
+}
+
+// fakeWrapper stands in for a confining sandbox without needing bwrap to be
+// usable on the machine running the tests.
+type fakeWrapper struct{ name string }
+
+func (f fakeWrapper) Wrap(bin string, args []string, _ sandbox.Spec) (string, []string) {
+	return bin, args
+}
+func (f fakeWrapper) Name() string { return f.name }

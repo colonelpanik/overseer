@@ -560,7 +560,7 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 			Attempt:        attempt,
 			Sandbox:        e.Sandbox,
 			SandboxSpec:    e.sandboxSpec(*task, role.Agent, role.Writable),
-			Env:            role.Env,
+			Env:            e.agentEnv(role),
 			OnEvent:        e.progressNotifier(task.ID),
 		})
 		if err != nil {
