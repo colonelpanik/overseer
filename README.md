@@ -362,16 +362,24 @@ quietly stayed put.
   `AWS_*`, and anything else your shell happens to export do not reach the
   agent. `sandbox_env_passthrough` lets an operator add more when a task
   genuinely needs it.
-- **The agents' own sandbox is turned off inside overseer's.** Each agent CLI
-  confines its own shell tool, and a sandbox inside a sandbox is refused on a
-  kernel that gates unprivileged user namespaces behind an AppArmor profile —
-  Ubuntu 24.04 and later, where `kernel.apparmor_restrict_unprivileged_userns`
-  is `1`. Overseer's own sandbox works there; the agent's then fails on every
-  run with `bwrap: No permissions to create a new namespace`, which reads in a
-  transcript exactly like overseer's being broken. So a confined agent is told
-  it is already confined (`CLAUDE_CODE_SANDBOXED`) and does not try. It is not
-  told that with `sandbox: off`, where its own is the only one there is. The
-  board says which applies.
+- **The agents' own sandboxes are turned off inside overseer's.** Both CLIs
+  confine their own shell tool with bubblewrap, and a sandbox inside a sandbox
+  is refused on a kernel that gates unprivileged user namespaces behind an
+  AppArmor profile — Ubuntu 24.04 and later, where
+  `kernel.apparmor_restrict_unprivileged_userns` is `1`. Overseer's own sandbox
+  works there; the agent's then fails on every run with `bwrap: No permissions
+  to create a new namespace`, which reads in a transcript exactly like
+  overseer's being broken. So a confined `claude` is told it is already confined
+  (`CLAUDE_CODE_SANDBOXED`), and a confined `codex` is run with
+  `--dangerously-bypass-approvals-and-sandbox`, which is what codex documents
+  for "environments that are externally sandboxed" — every one of its `-s`
+  modes, `danger-full-access` included, is built out of bubblewrap and would
+  still nest. Neither is done with `sandbox: off`, where the agent's own
+  sandbox is the only one there is. The board says which applies.
+- **The reviewer still cannot write.** That property now rests entirely on
+  bubblewrap: overseer mounts the reviewer's worktree read-only because
+  writability follows the *role*, not the CLI. Dropping codex's own
+  `-s read-only` removes a second statement of the same rule, not the rule.
 - Network is **not** restricted — the agents call an HTTPS API. The sandbox
   limits what an agent can read and write, not what it can send. Do not point
   overseer at a repository whose contents you would not want an agent to

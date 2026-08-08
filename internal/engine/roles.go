@@ -24,6 +24,14 @@ type resolved struct {
 	// whichever CLI it happens to run through, and the coder must be able to
 	// whichever CLI it happens to run through.
 	Writable bool
+	// Confined is whether overseer is sandboxing this invocation itself.
+	//
+	// Both CLIs sandbox their own shell tool with bubblewrap, and a nested user
+	// namespace is refused on a kernel that gates them behind an AppArmor
+	// profile. When overseer is doing the confining, each agent is told to skip
+	// its own; when it is not, the agent's own sandbox is the only one there is
+	// and is left alone.
+	Confined bool
 }
 
 // SetRoles replaces the provider and role tables while the daemon is running,
@@ -101,6 +109,7 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 		Model:    role.Model,
 		Env:      agent.ProviderEnv(role.Agent, provider.Kind, provider.BaseURL, key),
 		Writable: roleWrites[name],
+		Confined: e.confining(),
 	}
 	switch role.Agent {
 	case config.AgentCodex:
@@ -109,6 +118,11 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 		r.Runner = e.Claude
 	}
 	return r, nil
+}
+
+// confining reports whether overseer is sandboxing the agents itself.
+func (e *Engine) confining() bool {
+	return e.Sandbox != nil && e.Sandbox.Name() != "off"
 }
 
 // agentEnv is the environment one agent invocation gets: the role's provider
@@ -122,12 +136,16 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 // sandbox being broken. Telling the agent it is already confined stops it
 // trying.
 //
+// This is the claude half. codex takes a flag rather than an environment
+// variable — see CodexArgs — but the rule is the same, and both read it off
+// resolved.Confined.
+//
 // Only when overseer is actually confining it. With the sandbox off, the
 // agent's own is the only one there is, and claiming otherwise would turn a
 // deliberate "no sandbox" into a silently unprotected agent that believes it
 // is protected.
 func (e *Engine) agentEnv(role resolved) map[string]string {
-	if e.Sandbox == nil || e.Sandbox.Name() == "off" {
+	if !role.Confined {
 		return role.Env
 	}
 	env := make(map[string]string, len(role.Env)+1)
@@ -146,10 +164,11 @@ func (e *Engine) agentEnv(role resolved) map[string]string {
 func (r resolved) args(prompt, resume, schemaPath, lastMessage string) []string {
 	if r.Agent == config.AgentCodex {
 		return agent.CodexArgs(agent.CodexOpts{
-			Prompt:          prompt,
-			SchemaPath:      schemaPath,
-			LastMessagePath: lastMessage,
-			Model:           r.Model,
+			Prompt:              prompt,
+			SchemaPath:          schemaPath,
+			LastMessagePath:     lastMessage,
+			Model:               r.Model,
+			ExternallySandboxed: r.Confined,
 		})
 	}
 	return agent.ClaudeArgs(agent.ClaudeOpts{

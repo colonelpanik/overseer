@@ -240,57 +240,99 @@ func containsArg(args []string, want string) bool {
 	return false
 }
 
-// The agent CLIs sandbox their own shell tool, and a sandbox inside a sandbox
-// is refused on kernels that gate unprivileged user namespaces behind an
-// AppArmor profile. Telling the agent it is already confined stops it trying —
-// and stops "bwrap: No permissions to create a new namespace" appearing in
-// every transcript as if overseer's own sandbox were broken.
-func TestConfinedAgentsAreToldTheyAreAlreadySandboxed(t *testing.T) {
+// Both CLIs sandbox their own shell tool, and a sandbox inside a sandbox is
+// refused on kernels that gate unprivileged user namespaces behind an AppArmor
+// profile. Each agent is told to skip its own — claude by an environment
+// variable, codex by a flag — which is what stops "bwrap: No permissions to
+// create a new namespace" appearing in every transcript as if overseer's own
+// sandbox were broken.
+//
+// The sandbox is set before the role is resolved, because Confined is a
+// property of the resolved role rather than something read at dispatch time.
+func TestConfinedAgentsSkipTheirOwnSandbox(t *testing.T) {
 	h := newHarness(t, "true", "true")
-	role, err := h.eng.resolveRole(config.RoleCode)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	h.eng.Sandbox = fakeWrapper{name: "bwrap"}
-	if got := h.eng.agentEnv(role)["CLAUDE_CODE_SANDBOXED"]; got != "1" {
-		t.Errorf("CLAUDE_CODE_SANDBOXED = %q, want 1 when overseer is confining the agent", got)
-	}
-}
 
-// With the sandbox off the agent's own is the only one there is. Claiming
-// otherwise turns a deliberate "no sandbox" into an unprotected agent that
-// believes it is protected.
-func TestUnconfinedAgentsAreNotToldTheyAreSandboxed(t *testing.T) {
-	h := newHarness(t, "true", "true")
-	role, err := h.eng.resolveRole(config.RoleCode)
+	code, err := h.eng.resolveRole(config.RoleCode)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	h.eng.Sandbox = sandbox.Passthrough{}
-	if _, ok := h.eng.agentEnv(role)["CLAUDE_CODE_SANDBOXED"]; ok {
-		t.Error("an unsandboxed agent was told it is already confined")
+	if !code.Confined {
+		t.Fatal("a role resolved under a sandbox is not marked confined")
 	}
-	h.eng.Sandbox = nil
-	if _, ok := h.eng.agentEnv(role)["CLAUDE_CODE_SANDBOXED"]; ok {
-		t.Error("an agent with no wrapper at all was told it is already confined")
+	if got := h.eng.agentEnv(code)["CLAUDE_CODE_SANDBOXED"]; got != "1" {
+		t.Errorf("CLAUDE_CODE_SANDBOXED = %q, want 1", got)
+	}
+
+	review, err := h.eng.resolveRole(config.RoleReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := review.args("p", "", "", "")
+	if !hasArg(args, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("codex argv = %v, want it to skip building its own sandbox", args)
+	}
+	// codex implements every sandbox mode with bubblewrap, danger-full-access
+	// included, so -s of any value would still nest.
+	if hasArg(args, "-s") {
+		t.Errorf("codex argv = %v, want no -s at all when externally sandboxed", args)
 	}
 }
 
-// agentEnv must not write through to the role's own map, which resolveRole
-// hands out fresh per call but which callers may hold.
+// With the sandbox off, each agent's own sandbox is the only one there is.
+// Claiming otherwise turns a deliberate "no sandbox" into an unprotected agent
+// that believes it is protected.
+func TestUnconfinedAgentsKeepTheirOwnSandbox(t *testing.T) {
+	for _, wrapper := range []sandbox.Wrapper{sandbox.Passthrough{}, nil} {
+		h := newHarness(t, "true", "true")
+		h.eng.Sandbox = wrapper
+
+		code, err := h.eng.resolveRole(config.RoleCode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code.Confined {
+			t.Errorf("wrapper %v: role marked confined with no sandbox", wrapper)
+		}
+		if _, ok := h.eng.agentEnv(code)["CLAUDE_CODE_SANDBOXED"]; ok {
+			t.Errorf("wrapper %v: an unsandboxed agent was told it is confined", wrapper)
+		}
+
+		review, err := h.eng.resolveRole(config.RoleReview)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := review.args("p", "", "", "")
+		if !hasArg(args, "-s") || !hasArg(args, "read-only") {
+			t.Errorf("wrapper %v: codex argv = %v, want -s read-only kept", wrapper, args)
+		}
+		if hasArg(args, "--dangerously-bypass-approvals-and-sandbox") {
+			t.Errorf("wrapper %v: codex told to skip its sandbox with none of ours in place", wrapper)
+		}
+	}
+}
+
+// agentEnv must not write through to the role's own map, which callers hold.
 func TestAgentEnvDoesNotMutateTheRolesMap(t *testing.T) {
 	h := newHarness(t, "true", "true")
+	h.eng.Sandbox = fakeWrapper{name: "bwrap"}
 	role, err := h.eng.resolveRole(config.RoleCode)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.eng.Sandbox = fakeWrapper{name: "bwrap"}
 	h.eng.agentEnv(role)
 	if _, ok := role.Env["CLAUDE_CODE_SANDBOXED"]; ok {
 		t.Error("agentEnv wrote into the role's environment map")
 	}
+}
+
+func hasArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 // fakeWrapper stands in for a confining sandbox without needing bwrap to be
