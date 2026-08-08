@@ -34,6 +34,13 @@ func (e *Engine) EnsureRepo(ctx context.Context, repoPath string) (store.Repo, e
 		return store.Repo{}, err
 	}
 
+	// A repository registered before its first commit has no default branch to
+	// report, and one registered before `git remote add` has no origin. Both
+	// errors are ignored on purpose — neither is a reason to refuse the
+	// repository — but because UpsertRepo never overwrites a stored value with
+	// a blank one, a value missed here would stay missing forever. So this runs
+	// on every registration, and every submit calls it: the first commit or the
+	// first remote is picked up on the next one.
 	r := store.Repo{Path: abs, Detected: probeRepo(ctx, abs)}
 	if branch, err := worktree.DefaultBranch(ctx, abs); err == nil {
 		r.DefaultBranch = branch

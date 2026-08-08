@@ -214,16 +214,20 @@ func (s *Server) buildWizard(ctx context.Context, q Query) (*WizardView, error) 
 		if err != nil {
 			return nil, err
 		}
+		// Two doors into the same wizard: design something, or analyse a
+		// repository. Both start on the source screen; the kind decides which
+		// form that screen is.
 		return &WizardView{
-			ID:       WizardNew,
-			Step:     StepSource,
-			Model:    s.analyseModel(),
-			MaxTasks: 12,
-			Focus:    append([]FocusChoice(nil), FocusAreas...),
-			Models:   s.analyseModels(""),
-			Repos:    repos,
-			ReposURL: q.URL("wizard", 0, "overlay", "repos"),
-			CloseURL: q.URL("wizard", 0),
+			ID:        WizardNew,
+			Designing: q.Wizard == WizardDesign,
+			Step:      StepSource,
+			Model:     s.analyseModel(),
+			MaxTasks:  12,
+			Focus:     append([]FocusChoice(nil), FocusAreas...),
+			Models:    s.analyseModels(""),
+			Repos:     repos,
+			ReposURL:  q.URL("wizard", 0, "overlay", "repos"),
+			CloseURL:  q.URL("wizard", 0),
 		}, nil
 	}
 
@@ -244,11 +248,25 @@ func (s *Server) buildWizard(ctx context.Context, q Query) (*WizardView, error) 
 	}
 
 	var live *LivePane
-	if p.State == store.ProposalAnalysing && p.TranscriptPath != "" {
-		live = transcriptPane(p.TranscriptPath, "analysis", true)
+	if p.TranscriptPath != "" &&
+		(p.State == store.ProposalAnalysing || p.State == store.ProposalScaffolding) {
+		live = transcriptPane(p.TranscriptPath, "agent", true)
 	}
 	w := buildWizard(p, rows, live, q)
 	w.Models = s.analyseModels(p.Model)
+	if p.State == store.ProposalDesigning || p.Design != "" {
+		w.Designing = true
+		if w.Design, err = s.buildDesign(ctx, p); err != nil {
+			return nil, err
+		}
+		// The header's figure has to include the conversation, or it reads
+		// $0.00 next to a footer saying the conversation has cost real money.
+		spend, err := s.store.ArchitectSpend(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		w.Spend = money(p.CostUSD + spend)
+	}
 	return w, nil
 }
 

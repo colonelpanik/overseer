@@ -51,6 +51,22 @@ func newRepoWithRemote(t *testing.T) string {
 // an "origin" remote that is healthy and reachable but has nothing pushed to
 // it yet -- the state right after `git remote add origin <url>` on a
 // brand-new project, before the first push.
+// newRepoWithoutRemote creates a repo with one commit and no origin at all —
+// a perfectly ordinary local project, and what overseer creates itself.
+func newRepoWithoutRemote(t *testing.T) string {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), "work")
+	gitRun(t, t.TempDir(), "init", "--initial-branch=main", work)
+	gitRun(t, work, "config", "user.name", "test")
+	gitRun(t, work, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(work, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, work, "add", ".")
+	gitRun(t, work, "commit", "-m", "initial")
+	return work
+}
+
 func newRepoWithUnpushedRemote(t *testing.T) string {
 	t.Helper()
 	base := t.TempDir()
@@ -374,8 +390,12 @@ func TestPushToLocalBareRemote(t *testing.T) {
 	if _, err := m.Commit(ctx, wt, "add new.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Push(ctx, wt); err != nil {
+	pushed, err := m.Push(ctx, wt)
+	if err != nil {
 		t.Fatalf("Push: %v", err)
+	}
+	if !pushed {
+		t.Fatal("Push reported nothing pushed against a repository that has an origin")
 	}
 
 	remotes := gitRun(t, repo, "ls-remote", "--heads", "origin")
@@ -426,5 +446,36 @@ func TestGitRefusesAnEmptyDirectory(t *testing.T) {
 
 	if _, err := m.Diff(ctx, Worktree{BaseRef: "main"}); err == nil {
 		t.Error("Diff with no worktree directory succeeded")
+	}
+}
+
+// A repository with no origin is not an error. Overseer creates repositories
+// itself, and a task against one must still be able to finish: the work is on
+// the branch, which is the durable record either way.
+func TestPushSkipsWhenThereIsNoRemote(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepoWithoutRemote(t)
+	m := NewManager(t.TempDir())
+
+	wt, err := m.Create(ctx, repo, "no-remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Dir, "new.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Commit(ctx, wt, "add new.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	pushed, err := m.Push(ctx, wt)
+	if err != nil {
+		t.Fatalf("Push against a repository with no origin: %v", err)
+	}
+	if pushed {
+		t.Error("Push claimed to have pushed with no origin configured")
+	}
+	if HasRemote(ctx, wt.Dir) {
+		t.Error("HasRemote is true for a repository with no origin")
 	}
 }

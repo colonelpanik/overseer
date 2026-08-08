@@ -2,9 +2,12 @@ package engine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"overseer/internal/loop"
 	"overseer/internal/store"
 )
 
@@ -471,5 +474,88 @@ func TestRepoStatsAddUpAcrossARealRun(t *testing.T) {
 	}
 	if got.Reported <= 0 {
 		t.Errorf("Reported = %v, want the fake agents' reported usage", got.Reported)
+	}
+}
+
+// git resolves a repository by walking up, so `rev-parse` succeeds from any
+// subdirectory. Registering one as its own repository means every later git
+// command silently operates on the enclosing one — a worktree cut for a task
+// under /repo/internal/web would put a branch and a full checkout in /repo.
+func TestEnsureRepoRefusesASubdirectoryOfARepository(t *testing.T) {
+	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	sub := filepath.Join(h.repo, "internal", "web")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := h.eng.EnsureRepo(ctx, sub)
+	if err == nil {
+		t.Fatal("a subdirectory was registered as its own repository")
+	}
+	if !strings.Contains(err.Error(), "repository root") {
+		t.Errorf("err = %v, want it to point at the repository root", err)
+	}
+
+	// The root itself still works, and is what the subdirectory pointed at.
+	if _, err := h.eng.EnsureRepo(ctx, h.repo); err != nil {
+		t.Fatalf("the repository root was refused: %v", err)
+	}
+}
+
+// A converged task with nowhere to push is done, not failed. It used to run the
+// whole loop, converge, commit, and only then be marked failed — having spent
+// its entire budget on work it then reported as lost.
+func TestATaskWithNoRemoteFinishesRatherThanFailing(t *testing.T) {
+	h := newHarness(t,
+		fakeClaude(t, `echo 'package main' > added.go`),
+		fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	// A repository with no origin at all.
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "--initial-branch=main", ".")
+	run(t, repo, "git", "config", "user.email", "t@example.com")
+	run(t, repo, "git", "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "add", ".")
+	run(t, repo, "git", "commit", "-m", "initial")
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: repo, Goal: "no remote here"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.RunTask(ctx, task.ID); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != string(loop.StateDone) {
+		t.Fatalf("State = %q (err %q), want done", got.State, got.ErrMsg)
+	}
+	if got.PRURL != "" {
+		t.Errorf("PRURL = %q; there was no remote to open one against", got.PRURL)
+	}
+	if len(h.pr.Calls) != 0 {
+		t.Errorf("a pull request was attempted with no remote: %+v", h.pr.Calls)
+	}
+	// Not an error: the task succeeded. The board says "no remote" by reading
+	// done-with-no-PR, not by finding a message here.
+	if got.ErrMsg != "" {
+		t.Errorf("ErrMsg = %q; a successful task must not carry an error", got.ErrMsg)
+	}
+	// The work is on the branch, which is the durable record when there is no
+	// pull request to carry it.
+	if !strings.Contains(gitOut(t, repo, "log", "--format=%s", got.Branch), "overseer:") {
+		t.Error("the branch carries no overseer commit")
+	}
+	if !strings.Contains(gitOut(t, repo, "show", "--name-only", "--format=", got.Branch), "added.go") {
+		t.Error("the agent's file is not on the branch")
 	}
 }

@@ -846,9 +846,28 @@ func (e *Engine) finish(ctx context.Context, task *store.Task) (*loop.Outcome, e
 		return &loop.Outcome{Failed: true,
 			ErrMsg: "nothing was committed; refusing to open an empty pull request"}, nil
 	}
-	if err := e.WT.Push(ctx, wt); err != nil {
+	pushed, err := e.WT.Push(ctx, wt)
+	if err != nil {
 		// The worktree is deliberately left in place so the work is not lost.
 		return &loop.Outcome{Failed: true, ErrMsg: "push: " + err.Error()}, nil
+	}
+	if !pushed {
+		// No remote to push to, which is a repository overseer can perfectly
+		// well work on — one it created itself, most obviously. The work is
+		// committed on the branch, which is the durable record either way, so
+		// this is done rather than failed. Add a remote later and the pull
+		// request flow resumes with no other change.
+		//
+		// Nothing is written to say so. A done task with no pull request URL
+		// is already exactly that statement, and the board reads it — putting
+		// it in ErrMsg instead would render a successful task in the styling
+		// reserved for ones that broke.
+		//
+		// The worktree is kept, unlike the pull-request path: there is no pull
+		// request to read the change in, so the checkout is the only place it
+		// can be looked at.
+		e.notify(task.ID)
+		return &loop.Outcome{}, nil
 	}
 
 	plan, _ := os.ReadFile(filepath.Join(wt.Dir, "PLAN.md"))
@@ -1081,6 +1100,22 @@ func (e *Engine) analysisSandboxSpec(repoPath, runDir, agentName string) sandbox
 		Add(repoPath, false).
 		Add(runDir, true)
 	return e.toolchainMounts(spec)
+}
+
+// scaffoldSandboxSpec confines the one agent turn that writes a new project.
+//
+// The analysis sandbox with the repository WRITABLE, and that inversion is the
+// whole difference. It is safe here for a reason that does not generalise: the
+// repository is one overseer created a moment ago and it contains a single
+// empty commit, so there is nothing in it to damage and nothing of the
+// operator's to leave a mess in. Every other non-task turn keeps the read-only
+// mount, and a task's writable tree is a worktree rather than the repository
+// itself.
+func (e *Engine) scaffoldSandboxSpec(repoPath, runDir, agentName string) sandbox.Spec {
+	spec := e.analysisSandboxSpec(repoPath, runDir, agentName)
+	// Appended rather than edited in place: mounts apply in order, so a
+	// writable mount after the read-only one is what takes effect.
+	return spec.Add(repoPath, true)
 }
 
 // goCacheDirs are overseer's own Go build and module cache directories, under

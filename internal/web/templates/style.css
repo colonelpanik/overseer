@@ -792,3 +792,37 @@ pre.term {
 .planfoot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .planfoot .small { text-wrap: pretty; max-width: 70ch; }
 .planpath { opacity: .7; overflow-wrap: anywhere; }
+
+/* ── the design conversation ──────────────────────────────────────────── */
+
+.convo { gap: 12px; }
+.turns { display: flex; flex-direction: column; gap: 12px; }
+
+/* Sided, because who said a thing is the fastest way to read a conversation
+   back. Not bubbles: this system has no rounded corners and a design
+   conversation is prose worth reading, not chat. */
+.turn { display: flex; flex-direction: column; gap: 4px; max-width: 78%; }
+.turn.mine { align-self: flex-end; align-items: flex-end; }
+.turn.theirs { align-self: flex-start; }
+.turn .who { display: flex; align-items: center; gap: 7px; }
+.turn .said {
+  padding: 10px 12px; white-space: pre-wrap; text-wrap: pretty;
+  font: 400 13.5px/1.55 var(--font-body);
+  background: var(--color-surface);
+  border-left: 2px solid var(--color-divider);
+}
+.turn.mine .said {
+  border-left: 0; border-right: 2px solid var(--color-accent);
+  background: var(--color-accent-100);
+}
+.turn.bad .said { border-left-color: var(--color-accent); color: var(--color-accent-800); }
+.turn.thinking .said { color: var(--mute); font-style: italic; }
+.turn.thinking .pip { width: 7px; height: 7px; background: var(--color-accent); animation: pulse 1.4s infinite; }
+
+.convo-say {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 13px 20px; background: var(--color-surface);
+  border-top: 2px solid var(--color-divider);
+}
+.convo-say textarea { resize: vertical; }
+.convo-say .foot { display: flex; align-items: center; gap: 10px; padding: 0; border: 0; }

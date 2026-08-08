@@ -500,12 +500,36 @@ func (e *Engine) proposalDir(proposalID int64) string {
 func (e *Engine) notifyProposal() { e.notify(0) }
 
 // checkRepo is the same validation Submit applies to a submitted repository.
+//
+// It insists the path is the repository's ROOT, not merely somewhere inside
+// one. git resolves a repository by walking up, so `rev-parse` succeeds from
+// any subdirectory — and the path is then registered as its own repository
+// while every git command run against it silently operates on the enclosing
+// one. A worktree cut for a task under /repo/internal/web would put a branch
+// and a full checkout in /repo, which is not a thing anybody asked for.
 func checkRepo(ctx context.Context, repoPath string) error {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
 	cmd.Dir = repoPath
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		return fmt.Errorf("%s is not a git repository: %v: %s",
 			repoPath, err, strings.TrimSpace(string(out)))
+	}
+
+	// Both sides through EvalSymlinks: git reports the real path, and a
+	// submitted path may reach it through a symlink — on macOS /tmp is one,
+	// which would make every temporary repository look like a subdirectory.
+	top, err := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+	if err != nil {
+		return fmt.Errorf("resolve the repository root of %s: %w", repoPath, err)
+	}
+	given, err := filepath.EvalSymlinks(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", repoPath, err)
+	}
+	if top != given {
+		return fmt.Errorf("%s is inside the repository at %s, not a repository itself; "+
+			"give the repository root", repoPath, top)
 	}
 	return nil
 }

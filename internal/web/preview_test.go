@@ -51,9 +51,12 @@ func TestWritePreview(t *testing.T) {
 		"backlog.html":       "/?overlay=backlog",
 		"repo-filtered.html": "/?repo=1",
 		"plan.html":          "/?sel=1&tab=plan",
+		"design-new.html":    "/?wizard=-2",
+		"design-convo.html":  "/?wizard=6",
 		"stopped.html":       "/?sel=6&tab=plan",
 	}
 	seedPreviewStopped(t, st)
+	seedPreviewDesign(t, st)
 	seedPreviewBacklog(t, st)
 	for name, path := range pages {
 		rec := httptest.NewRecorder()
@@ -569,3 +572,46 @@ The existing test asserts an exact sleep, which full jitter makes meaningless.
 It is replaced by one asserting the draw stays inside [0, ceiling) and that the
 mean lands near half the ceiling over enough samples.
 `
+
+// seedPreviewDesign creates a conversation mid-flight, which is the state the
+// surface exists for and the one worth looking at.
+func seedPreviewDesign(t *testing.T, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	p, err := st.CreateProposal(ctx, store.Proposal{
+		Kind:  store.ProposalCreate,
+		State: store.ProposalDesigning,
+		Notes: "a CLI that syncs one S3 bucket to another, one way, resumable. Go, no third-party dependencies.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns := []store.ArchitectTurn{
+		{Speaker: store.SpeakerOperator, Body: p.Notes},
+		{Speaker: store.SpeakerArchitect, CostUSD: 0.31, Body: `Two things decide the shape here.
+
+Resumable across what — a killed process, or a machine that comes back a day later? The first is a file in the working directory; the second needs the state to live beside the destination, which changes where the manifest goes.
+
+And is "one way" a mirror, or an append? A mirror deletes on the destination, which is the operation people regret at 2am.
+
+My default if you have no view: process-local resume, append-only, and an explicit --delete that refuses without --yes.`},
+		{Speaker: store.SpeakerOperator, Body: "machine comes back a day later. and append only — I don't want delete at all, not even behind a flag."},
+		{Speaker: store.SpeakerArchitect, CostUSD: 0.44, Body: `Good, that simplifies it.
+
+The manifest lives in the destination bucket under a reserved prefix, so any machine can pick up where any other left off. One object per run, listing what has been copied and the etag it was copied at. Resume is: read the manifest, diff against the source listing, copy what is missing.
+
+No delete anywhere in the code — not a flag, not a function. That is worth stating in the design, because it is the kind of thing someone adds back in six months without noticing it was deliberate.
+
+Three pieces: a lister that pages both buckets, a manifest reader/writer, and a copier that takes the diff. The CLI is thin over those.
+
+Anything about credentials, or is the ambient AWS config fine?`},
+		{Speaker: store.SpeakerOperator, Body: "ambient is fine. go with that."},
+	}
+	for _, turn := range turns {
+		turn.ProposalID = p.ID
+		if _, err := st.AddArchitectTurn(ctx, turn); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
