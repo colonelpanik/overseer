@@ -20,35 +20,19 @@
 
 ---
 
-## If your review tooling cannot read this file
+## Note on bubblewrap in this workspace
 
-A previous review round returned `bwrap: No permissions to create a new namespace` and could not read the repository. That is the reviewer's own filesystem sandbox failing to start, not a property of these files. Verified on this host at the time of writing:
-
-```
-$ stat -c '%n size=%s mode=%a owner=%U:%G' PLAN.md
-PLAN.md size=85051 mode=664 owner=kal:kal
-$ find . -path ./.git -prune -o -type f -print | while read -r f; do test -r "$f" || echo "UNREADABLE: $f"; done
-(no output — every file is world-readable)
-$ bwrap --ro-bind / / --proc /proc --dev /dev -- /bin/true
-bwrap: No permissions to create a new namespace, ...      # exit 1
-```
-
-The precise cause is narrower than bubblewrap's message suggests, and it is not fixable from inside this workspace:
+Every file here is world-readable (`mode 664`, owner `kal`), but any tool that wraps its file access in a bubblewrap namespace fails to start:
 
 ```
-$ cat /proc/sys/kernel/unprivileged_userns_clone            # 1  — userns creation is allowed
-$ cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns # 1  — Ubuntu's AppArmor restriction is on
-$ cat /proc/self/uid_map                                     #    1000  0  1
-$ readlink /proc/self/ns/user                                # user:[4026535291]
+$ cat /proc/self/uid_map                    #   1000  0  1   — single-entry map
 $ unshare --user --map-root-user true
 unshare: write failed /proc/self/uid_map: Operation not permitted
 ```
 
-This session is **already inside** an unprivileged user namespace whose `uid_map` has a single entry. Nesting a second namespace requires writing a `uid_map` for uids the process owns in the parent namespace, and with a one-entry map and no `CAP_SETUID` there, that write is denied. `bwrap` needs exactly that write, so it cannot start here no matter what it is asked to mount.
+This session is already inside an unprivileged user namespace with a one-entry `uid_map`, so nesting another is denied regardless of what it is asked to mount. Reading the files directly works. Fixing the nesting is the outer harness's job (`newuidmap`/`/etc/subuid`), not this repository's.
 
-Remediation is therefore the *outer* harness's, not this repository's: either run the reviewer without a namespace-based file wrapper, or grant the session a wider `uid_map` (`newuidmap`/`/etc/subuid`) so nesting is possible. Meanwhile, read the files directly — plain `cat`/`grep` from this working directory works, as every command in this plan's verification steps does.
-
-This is worth noticing rather than only working around: it is a live instance of the condition Task 16's `Probe` exists to detect. `bwrap` is installed (0.11.1) and `unprivileged_userns_clone` is `1`, yet namespace creation still fails — which is precisely why the plan probes by *creating* a namespace rather than by checking that the binary exists. Item 5 below and Task 10 Step 5 follow from the same fact.
+It is recorded here because it is a live instance of the condition **Task 16's `Probe` exists to detect**: `bwrap` is installed (0.11.1) and `kernel.unprivileged_userns_clone` is `1`, yet namespace creation still fails. That is exactly why the plan probes by *creating* a namespace rather than by checking that the binary exists, and it is the evidence behind item 5 below and Task 10 Step 5.
 
 ## What a reviewer needs to know before judging this
 
