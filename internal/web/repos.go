@@ -181,6 +181,29 @@ func (s *Server) buildRepos(ctx context.Context, q Query) (*ReposView, error) {
 	return v, nil
 }
 
+// repoChoices are the registered repositories a picker may offer, newest last
+// and archived ones left out.
+//
+// A repository the operator has put away should not be in the list of things to
+// start new work on — that is what archiving it meant.
+func (s *Server) repoChoices(ctx context.Context, q Query) ([]RepoChoice, error) {
+	repos, err := s.store.ListRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RepoChoice, 0, len(repos))
+	for _, r := range repos {
+		if r.Archived() {
+			continue
+		}
+		out = append(out, RepoChoice{
+			ID: r.ID, Slug: r.Slug, Path: r.Path, On: r.ID == q.Repo,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out, nil
+}
+
 // RepoChip is the nav's "showing one repository" indicator, with the way out.
 type RepoChip struct {
 	Slug     string

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"overseer/internal/store"
 )
@@ -504,5 +505,92 @@ func TestRepoSurfacesReuseTheBoardsRowVocabulary(t *testing.T) {
 	// The backlog's group headers are the board's, not a second kind.
 	if !strings.Contains(get(t, s, "/?overlay=backlog").Body.String(), `class="grouphead`) {
 		t.Error("the backlog panel does not use the board's group header")
+	}
+}
+
+// Analysing the same repository twice is the normal case, and the second time
+// should not need its path typed again.
+func TestWizardOffersRegisteredRepositoriesAsADropdown(t *testing.T) {
+	s, st := newTestServer(t)
+	ctx := context.Background()
+
+	if _, err := st.UpsertRepo(ctx, store.Repo{Path: "/src/widget"}); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := st.UpsertRepo(ctx, store.Repo{Path: "/src/retired"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived.ArchivedAt = time.Now().UTC()
+	if err := st.SaveRepo(ctx, archived); err != nil {
+		t.Fatal(err)
+	}
+
+	body := get(t, s, "/?wizard=-1").Body.String()
+	if !strings.Contains(body, `<select class="input" id="wrepo" name="repo">`) {
+		t.Error("the wizard's first step does not offer a repository dropdown")
+	}
+	if !strings.Contains(body, `value="widget"`) {
+		t.Error("a registered repository is missing from the dropdown")
+	}
+	// Archiving a repository means not starting new work on it.
+	if strings.Contains(body, `value="retired"`) {
+		t.Error("an archived repository is still offered for a new analysis")
+	}
+	// A repository not registered yet must still be reachable.
+	if !strings.Contains(body, `name="repo_path"`) {
+		t.Error("the wizard no longer accepts a path that is not registered yet")
+	}
+	if !strings.Contains(body, "Add a repository") {
+		t.Error("the wizard does not link to adding a repository")
+	}
+}
+
+// Before any repository exists there is nothing to choose from, so the first
+// step has to stay a plain path field rather than an empty dropdown.
+func TestWizardFallsBackToAPathFieldWithNoRepositories(t *testing.T) {
+	s, _ := newTestServer(t)
+	body := get(t, s, "/?wizard=-1").Body.String()
+	if strings.Contains(body, `name="repo"`) {
+		t.Error("an empty dropdown is offered when nothing is registered")
+	}
+	if !strings.Contains(body, `name="repo_path"`) {
+		t.Error("the path field is missing")
+	}
+}
+
+func TestAnalyseAcceptsASlugFromTheDropdownAndAPathFromTheField(t *testing.T) {
+	ctx := context.Background()
+
+	// By slug, from the dropdown.
+	s, st := newTestServer(t)
+	repo, err := st.UpsertRepo(ctx, store.Repo{Path: initRepo(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := post(t, s, "/analyse", url.Values{"repo": {repo.Slug}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("by slug: status = %d, want 303: %s", rec.Code, rec.Body.String())
+	}
+	props, err := st.ListProposals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props) != 1 || props[0].RepoID != repo.ID {
+		t.Fatalf("proposals = %+v, want one against repo %d", props, repo.ID)
+	}
+
+	// By path, from the field beneath it.
+	s2, st2 := newTestServer(t)
+	dir := initRepo(t)
+	if rec := post(t, s2, "/analyse", url.Values{"repo_path": {dir}}); rec.Code != http.StatusSeeOther {
+		t.Fatalf("by path: status = %d, want 303: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st2.RepoByPath(ctx, dir); err != nil {
+		t.Errorf("a path given to the wizard did not register its repository: %v", err)
+	}
+
+	// Nothing at all is still an error rather than a proposal against "".
+	if rec := post(t, s2, "/analyse", url.Values{}); rec.Code != http.StatusBadRequest {
+		t.Errorf("empty submit = %d, want 400", rec.Code)
 	}
 }

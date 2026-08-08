@@ -203,6 +203,10 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 // rather than failing the whole page.
 func (s *Server) buildWizard(ctx context.Context, q Query) (*WizardView, error) {
 	if q.Wizard < 0 {
+		repos, err := s.repoChoices(ctx, q)
+		if err != nil {
+			return nil, err
+		}
 		return &WizardView{
 			ID:       WizardNew,
 			Step:     StepSource,
@@ -210,6 +214,8 @@ func (s *Server) buildWizard(ctx context.Context, q Query) (*WizardView, error) 
 			MaxTasks: 12,
 			Focus:    append([]FocusChoice(nil), FocusAreas...),
 			Models:   s.analyseModels(""),
+			Repos:    repos,
+			ReposURL: q.URL("wizard", 0, "overlay", "repos"),
 			CloseURL: q.URL("wizard", 0),
 		}, nil
 	}

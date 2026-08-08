@@ -351,6 +351,13 @@ type WizardView struct {
 	// pass, which is what makes a reopened analysis legible.
 	AlreadyQueued int
 
+	// Repos are the registered repositories offered on the first step. A
+	// dropdown rather than a typed path: analysing the same repository twice is
+	// the normal case, and the second time should not need the path again.
+	Repos []RepoChoice
+	// ReposURL opens the Repos overlay, for a repository not on the list yet.
+	ReposURL string
+
 	CloseURL string
 }
 
