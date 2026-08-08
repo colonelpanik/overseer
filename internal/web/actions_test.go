@@ -102,8 +102,8 @@ func TestPostAbandonFailsTheTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != "failed" {
-		t.Errorf("State = %q, want failed", got.State)
+	if got.State != "abandoned" {
+		t.Errorf("State = %q, want abandoned", got.State)
 	}
 }
 

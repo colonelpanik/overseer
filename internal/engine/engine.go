@@ -510,7 +510,7 @@ func (e *Engine) dispatch(ctx context.Context, task *store.Task, action loop.Act
 }
 
 func (e *Engine) setupWorktree(ctx context.Context, task *store.Task) (*loop.Outcome, error) {
-	wt, err := e.WT.Create(ctx, task.RepoPath, task.Slug)
+	wt, err := e.WT.Create(ctx, task.RepoPath, task.RunSlug())
 	if err != nil {
 		return &loop.Outcome{Failed: true, ErrMsg: err.Error()}, nil
 	}
@@ -636,7 +636,8 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 
 	step, err := e.Store.StartStep(ctx, store.Step{
 		TaskID: task.ID, Phase: phase, Iteration: task.Iteration,
-		Agent: name, Provider: role.Provider, TranscriptPath: transcript,
+		Agent: name, Provider: role.Provider, RunSeq: task.RunSeq,
+		TranscriptPath: transcript,
 	})
 	if err != nil {
 		return agent.Result{}, store.Step{}, err
@@ -856,7 +857,7 @@ func (e *Engine) finish(ctx context.Context, task *store.Task) (*loop.Outcome, e
 }
 
 func (e *Engine) runDir(task store.Task) string {
-	return filepath.Join(e.Cfg.RunsDir(), task.Slug)
+	return filepath.Join(e.Cfg.RunsDir(), task.RunSlug())
 }
 
 func (e *Engine) worktreeOf(task store.Task) worktree.Worktree {

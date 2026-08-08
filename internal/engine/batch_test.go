@@ -136,13 +136,12 @@ func TestSubmitRejectsNonRepoPath(t *testing.T) {
 	}
 }
 
-// TestAbandonRefusesATaskAWorkerCurrentlyOwns is the direct regression test
-// for the missing guard on Abandon: without it, the call below would write
-// "failed", but a worker "holding" the task (claim without release, standing
-// in for a goroutine mid-RunTask) would silently overwrite that on its own
-// next SaveTask. The fix must refuse outright, with an error the operator can
-// see, rather than accept the call and let it be clobbered moments later.
-func TestAbandonRefusesATaskAWorkerCurrentlyOwns(t *testing.T) {
+// Abandon used to refuse a task a worker owned, because a write from the
+// handler would be overwritten by that worker's next SaveTask. Refusing was
+// honest but left the operator unable to stop a running task at all. The
+// request is now lodged with the worker, which applies it from the copy it is
+// actually holding — so the write cannot be lost, and the task really stops.
+func TestAbandonReachesATaskAWorkerCurrentlyOwns(t *testing.T) {
 	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
 	ctx := context.Background()
 
@@ -156,16 +155,25 @@ func TestAbandonRefusesATaskAWorkerCurrentlyOwns(t *testing.T) {
 	}
 	defer h.eng.release(task.ID, ctrl)
 
-	if err := h.eng.Abandon(ctx, task.ID); err == nil {
-		t.Fatal("Abandon succeeded on a task a worker currently owns")
+	if err := h.eng.Abandon(ctx, task.ID, StopOpts{}); err != nil {
+		t.Fatalf("Abandon on an owned task: %v", err)
 	}
 
+	// Lodged, not written: the worker owns the row, and it applies the request
+	// when it next reaches a boundary.
+	req, ok := stopRequested(ctrl)
+	if !ok {
+		t.Fatal("no request reached the worker")
+	}
+	if req.Kind != StopAbandon {
+		t.Errorf("Kind = %q, want abandon", req.Kind)
+	}
 	got, err := h.st.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State == string(loop.StateFailed) {
-		t.Error("the task's state was changed despite being owned by a worker")
+	if loop.IsTerminal(got.State) {
+		t.Errorf("State = %q; the handler wrote it directly instead of letting the owner do it", got.State)
 	}
 }
 
@@ -180,14 +188,17 @@ func TestAbandonStillWorksOnAnIdleTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.eng.Abandon(ctx, task.ID); err != nil {
+	if err := h.eng.Abandon(ctx, task.ID, StopOpts{}); err != nil {
 		t.Fatalf("Abandon on an idle task: %v", err)
 	}
 	got, err := h.st.GetTask(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != string(loop.StateFailed) {
-		t.Errorf("State = %q, want failed", got.State)
+	// abandoned, not failed: failed means something went wrong, and an
+	// operator's decision reading the same way makes the board's one urgent
+	// signal mean two different things.
+	if got.State != string(loop.StateAbandoned) {
+		t.Errorf("State = %q, want abandoned", got.State)
 	}
 }

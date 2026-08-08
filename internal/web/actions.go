@@ -85,7 +85,7 @@ func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
 		case "continue":
 			err = s.eng.ContinueEscalated(r.Context(), id, extraIterations)
 		case "abandon":
-			err = s.eng.Abandon(r.Context(), id)
+			err = s.eng.Abandon(r.Context(), id, engine.StopOpts{})
 		default:
 			http.Error(w, "unknown bulk action "+action, http.StatusBadRequest)
 			return
@@ -186,7 +186,7 @@ func (s *Server) handleAbandon(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.eng.Abandon(r.Context(), id); err != nil {
+	if err := s.eng.Abandon(r.Context(), id, engine.StopOpts{}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

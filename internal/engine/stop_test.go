@@ -502,3 +502,215 @@ func TestStoppedStepsCarryTheOperatorsReason(t *testing.T) {
 		t.Errorf("ErrMsg = %q, want the operator's reason", steps[0].ErrMsg)
 	}
 }
+
+// Stop parks; Start puts it back. The pair is the whole point, and neither
+// touches the state that says where the task had got to.
+func TestStopThenStartRoundTrips(t *testing.T) {
+	h := newHarness(t, blockingClaude(t), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "round trip"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait, _ := runInBackground(t, h, task.ID)
+	waitForAgentEdit(t, h, task.ID, "partial.go")
+
+	if err := h.eng.Stop(ctx, task.ID, StopOpts{Now: true}); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	wait()
+
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Stopped() {
+		t.Fatal("the task is not stopped")
+	}
+	parked := got.State
+	if loop.IsTerminal(parked) {
+		t.Fatalf("State = %q, want a resumable state", parked)
+	}
+
+	if err := h.eng.Start(ctx, task.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	got, err = h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Stopped() {
+		t.Error("the task is still stopped after Start")
+	}
+	if got.State != parked {
+		t.Errorf("State = %q, want %q — Start must not move the task, only unblock it", got.State, parked)
+	}
+}
+
+func TestStopRefusesATerminalTaskAndStartRefusesToResurrectOne(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "already over"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.State = string(loop.StateDone)
+	if err := h.st.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.eng.Stop(ctx, task.ID, StopOpts{}); err == nil {
+		t.Error("Stop succeeded on a task that is already done")
+	}
+	// Start on a terminal task must point at restart rather than silently
+	// doing nothing or resurrecting it.
+	if err := h.st.StopTask(ctx, task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	err = h.eng.Start(ctx, task.ID)
+	if err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Errorf("Start on a terminal task = %v, want it to point at restart", err)
+	}
+}
+
+// Restart works on its own branch, so the previous attempt survives as the
+// record of what was tried.
+func TestRestartRunsOnAFreshBranchAndKeepsThePreviousAttempt(t *testing.T) {
+	h := newHarness(t,
+		fakeClaude(t, `echo 'package main' > added.go`),
+		fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "try again"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.eng.setupWorktree(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	firstBranch := task.Branch
+	firstDir := task.WorktreeDir
+	task.State = string(loop.StateEscalated)
+	task.FindingHashes = []string{"fingerprint"}
+	if err := h.st.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.eng.Restart(ctx, task.ID, RestartOpts{
+		Constraints: []string{"do not touch the schema"},
+	}); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunSeq != 2 {
+		t.Fatalf("RunSeq = %d, want 2", got.RunSeq)
+	}
+	if got.State != string(loop.StateQueued) {
+		t.Errorf("State = %q, want queued", got.State)
+	}
+	if len(got.FindingHashes) != 0 {
+		t.Error("the old attempt's fingerprints survived; the first review would escalate at once")
+	}
+	if !strings.Contains(got.Constraints, "do not touch the schema") {
+		t.Errorf("Constraints = %q, want the amendment", got.Constraints)
+	}
+
+	// Attempt 1's branch and worktree are untouched.
+	if _, err := os.Stat(firstDir); err != nil {
+		t.Errorf("the previous attempt's worktree was removed: %v", err)
+	}
+	branches := gitOut(t, h.repo, "branch", "--list")
+	if !strings.Contains(branches, strings.TrimPrefix(firstBranch, "refs/heads/")) {
+		t.Errorf("the previous attempt's branch is gone:\n%s", branches)
+	}
+
+	// Attempt 2 gets its own.
+	if _, err := h.eng.setupWorktree(ctx, &got); err != nil {
+		t.Fatalf("setupWorktree for attempt 2: %v", err)
+	}
+	if got.Branch == firstBranch {
+		t.Errorf("attempt 2 reused attempt 1's branch %q", firstBranch)
+	}
+	if !strings.HasSuffix(got.Branch, "-r2") {
+		t.Errorf("Branch = %q, want it to name the attempt", got.Branch)
+	}
+	if got.WorktreeDir == firstDir {
+		t.Error("attempt 2 adopted attempt 1's worktree, so it would build on its commits")
+	}
+}
+
+// A restarted task must not reuse the previous attempt's run directory, or its
+// transcripts append to the old ones — the runner opens them append-only.
+func TestRestartIsolatesTheRunDirectory(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	first := store.Task{Slug: "widget", RunSeq: 1}
+	second := store.Task{Slug: "widget", RunSeq: 2}
+	if h.eng.runDir(first) == h.eng.runDir(second) {
+		t.Errorf("both attempts share the run directory %q", h.eng.runDir(first))
+	}
+}
+
+// Restarting a task with a pull request is unsafe in both directions, so it is
+// refused rather than guessed at.
+func TestRestartRefusesATaskWithAPullRequest(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "already shipped"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.PRURL = "https://example.test/pr/1"
+	task.State = string(loop.StateDone)
+	if err := h.st.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	err = h.eng.Restart(ctx, task.ID, RestartOpts{})
+	if err == nil {
+		t.Fatal("Restart succeeded on a task with an open pull request")
+	}
+	if !strings.Contains(err.Error(), "pull request") {
+		t.Errorf("err = %v, want it to name the pull request", err)
+	}
+}
+
+// Restart lodged against a running worker is applied by that worker.
+func TestRestartReachesARunningWorker(t *testing.T) {
+	h := newHarness(t, blockingClaude(t), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "restart me live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait, _ := runInBackground(t, h, task.ID)
+	waitForAgentEdit(t, h, task.ID, "partial.go")
+
+	if err := h.eng.Restart(ctx, task.ID, RestartOpts{
+		StopOpts: StopOpts{Now: true},
+	}); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	wait()
+
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunSeq != 2 {
+		t.Errorf("RunSeq = %d, want 2", got.RunSeq)
+	}
+	if got.State != string(loop.StateQueued) {
+		t.Errorf("State = %q, want queued", got.State)
+	}
+	if got.Stopped() {
+		t.Error("a restarted task is still stopped; it would never be claimed")
+	}
+}
