@@ -33,7 +33,22 @@ $ bwrap --ro-bind / / --proc /proc --dev /dev -- /bin/true
 bwrap: No permissions to create a new namespace, ...      # exit 1
 ```
 
-Unprivileged user namespaces are unavailable here, so *any* bubblewrap-based wrapper fails to start regardless of what it is asked to mount. Read the files directly — plain `cat`/`grep` from this working directory works, as every command in this plan's verification steps does. This is the same environmental fact recorded in item 5 below, and it is why Task 10 Step 5 rewrites the plan's sandbox checklist item.
+The precise cause is narrower than bubblewrap's message suggests, and it is not fixable from inside this workspace:
+
+```
+$ cat /proc/sys/kernel/unprivileged_userns_clone            # 1  — userns creation is allowed
+$ cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns # 1  — Ubuntu's AppArmor restriction is on
+$ cat /proc/self/uid_map                                     #    1000  0  1
+$ readlink /proc/self/ns/user                                # user:[4026535291]
+$ unshare --user --map-root-user true
+unshare: write failed /proc/self/uid_map: Operation not permitted
+```
+
+This session is **already inside** an unprivileged user namespace whose `uid_map` has a single entry. Nesting a second namespace requires writing a `uid_map` for uids the process owns in the parent namespace, and with a one-entry map and no `CAP_SETUID` there, that write is denied. `bwrap` needs exactly that write, so it cannot start here no matter what it is asked to mount.
+
+Remediation is therefore the *outer* harness's, not this repository's: either run the reviewer without a namespace-based file wrapper, or grant the session a wider `uid_map` (`newuidmap`/`/etc/subuid`) so nesting is possible. Meanwhile, read the files directly — plain `cat`/`grep` from this working directory works, as every command in this plan's verification steps does.
+
+This is worth noticing rather than only working around: it is a live instance of the condition Task 16's `Probe` exists to detect. `bwrap` is installed (0.11.1) and `unprivileged_userns_clone` is `1`, yet namespace creation still fails — which is precisely why the plan probes by *creating* a namespace rather than by checking that the binary exists. Item 5 below and Task 10 Step 5 follow from the same fact.
 
 ## What a reviewer needs to know before judging this
 
