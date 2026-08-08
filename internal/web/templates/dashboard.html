@@ -476,10 +476,40 @@
       {{else}}
       <form method="post" action="/analyse">
         <div class="body">
+          {{if .Repos}}
+          {{/* A dropdown, not a typed path: analysing the same repository twice
+               is the normal case, and the second time should not need the path
+               again. A path not registered yet still works — the field below
+               accepts one, and registering is a side effect of using it. */}}
           <div class="field">
-            <label for="wrepo">Repository already on this machine</label>
-            <input class="input" id="wrepo" name="repo" placeholder="/home/you/code/some-repo">
+            <label for="wrepo">Repository</label>
+            <select class="input" id="wrepo" name="repo">
+              <option value="">choose a repository…</option>
+              {{range .Repos}}
+              <option value="{{.Slug}}" {{if .On}}selected{{end}}>{{.Slug}} — {{.Path}}</option>
+              {{end}}
+            </select>
+            <p class="muted" style="font-size:11.5px;margin:6px 0 0">
+              Not listed? <a href="{{.ReposURL}}">Add a repository</a>, or give its path below.
+            </p>
           </div>
+          <div class="or">or</div>
+          <div class="field">
+            <label for="wpath">A path on this machine</label>
+            <input class="input" id="wpath" name="repo_path" placeholder="/home/you/code/some-repo">
+            <p class="muted" style="font-size:11.5px;margin:6px 0 0">
+              It registers itself, so it is on the list next time.
+            </p>
+          </div>
+          {{else}}
+          <div class="field">
+            <label for="wpath">Repository already on this machine</label>
+            <input class="input" id="wpath" name="repo_path" placeholder="/home/you/code/some-repo">
+            <p class="muted" style="font-size:11.5px;margin:6px 0 0">
+              It registers itself, so next time this is a dropdown.
+            </p>
+          </div>
+          {{end}}
           <div class="or">or</div>
           <div class="field">
             <label for="wurl">Clone a repository</label>

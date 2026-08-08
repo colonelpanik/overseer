@@ -8,13 +8,20 @@ import (
 
 // handleAnalyse opens a wizard against a local path or a URL to clone.
 func (s *Server) handleAnalyse(w http.ResponseWriter, r *http.Request) {
+	// The first step offers a dropdown of registered repositories and a field
+	// for a path that is not on it yet. Both arrive here as "which repository",
+	// and StartProposal resolves a slug or a path either way — so the two are
+	// folded rather than branched on.
 	repo := strings.TrimSpace(r.FormValue("repo"))
+	if repo == "" {
+		repo = strings.TrimSpace(r.FormValue("repo_path"))
+	}
 	url := strings.TrimSpace(r.FormValue("url"))
 
 	// One or the other, never both: a form that submitted both would leave it
 	// to this handler to guess which the operator meant.
 	if (repo == "") == (url == "") {
-		http.Error(w, "give either a repository path or a URL to clone, not both",
+		http.Error(w, "choose a repository, give a path, or give a URL to clone — one of the three",
 			http.StatusBadRequest)
 		return
 	}
