@@ -327,7 +327,7 @@ func (e *Engine) runAnalysisAgent(ctx context.Context, p *store.Proposal, prompt
 		Attempt:        attempt,
 		Sandbox:        e.Sandbox,
 		SandboxSpec:    e.analysisSandboxSpec(p.RepoPath, runDir, role.Agent),
-		Env:            role.Env,
+		Env:            e.agentEnv(role),
 		// Without this the wizard's live pane would hold whatever the
 		// transcript said when the page loaded, for the whole analysis.
 		OnEvent: e.progressNotifier(0),
