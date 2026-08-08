@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -110,8 +111,14 @@ exit 1`)
 	}
 }
 
+// hangSeconds is how long the fake agents below sleep. These tests distinguish
+// "the runner killed the process on its deadline" from "the runner waited for
+// the process to finish on its own", so any bound comfortably under this value
+// proves the point without measuring how loaded the machine is.
+const hangSeconds = 30
+
 func TestRunTimeoutKillsProcessAndReportsRetryable(t *testing.T) {
-	bin := writeFakeAgent(t, `sleep 30`)
+	bin := writeFakeAgent(t, fmt.Sprintf("sleep %d", hangSeconds))
 	r := NewCodexRunner(bin)
 
 	start := time.Now()
@@ -123,8 +130,12 @@ func TestRunTimeoutKillsProcessAndReportsRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("timeout took %v; the process was not killed promptly", elapsed)
+	// Deliberately generous, and deliberately derived from the sleep rather
+	// than being a round number. Pinning this near the 300ms deadline would
+	// test the scheduler, not the runner — this package's tests run alongside
+	// packages that spawn bubblewrap and git.
+	if elapsed := time.Since(start); elapsed > (hangSeconds/2)*time.Second {
+		t.Errorf("timeout took %v; the process was not killed on its deadline", elapsed)
 	}
 	if !strings.Contains(res.ErrMsg, "timeout") {
 		t.Errorf("ErrMsg = %q, want it to mention timeout", res.ErrMsg)
@@ -139,17 +150,39 @@ func TestRunStreamErrorSurvivesAndIsNotRetryableEvenAfterATimeout(t *testing.T) 
 	// The generic timeout classification must not clobber it: doing so
 	// would turn a non-retryable auth failure into something the engine
 	// retries three times for nothing.
-	bin := writeFakeAgent(t, `echo '{"type":"error","message":"not logged in"}'
-sleep 30`)
+	//
+	// This test has to get the agent's line out BEFORE the deadline fires, so
+	// the deadline must be long enough that process startup cannot lose the
+	// race. It was originally 300ms, and that was the source of a real flake:
+	// measured over 60 samples under 3x CPU oversubscription, time-to-first-
+	// output of a fake agent was median 15.7ms, p95 47.1ms, worst 231.5ms.
+	// A 300ms deadline is 1.3x that worst case, which is why it passed almost
+	// always and failed exactly when the machine was loaded — this package's
+	// tests run beside ones that spawn bubblewrap and git. Losing the race
+	// makes ErrMsg the generic timeout, failing both assertions below for a
+	// reason unrelated to what is under test.
+	//
+	// 2s is ~9x the worst case measured under deliberately pathological load.
+	// The marker file below turns any remaining environment failure into a
+	// clear diagnostic instead of a confusing assertion mismatch.
+	ready := filepath.Join(t.TempDir(), "wrote")
+	bin := writeFakeAgent(t, fmt.Sprintf(
+		`echo '{"type":"error","message":"not logged in"}'
+touch %s
+sleep %d`, ready, hangSeconds))
 	r := NewCodexRunner(bin)
 
 	res, err := r.Run(context.Background(), RunSpec{
 		Args: []string{"x"}, Dir: t.TempDir(),
 		TranscriptPath: filepath.Join(t.TempDir(), "t.jsonl"),
-		Timeout:        300 * time.Millisecond,
+		Timeout:        2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if _, statErr := os.Stat(ready); statErr != nil {
+		t.Fatalf("the fake agent never got far enough to emit its error line "+
+			"within the deadline, so this test proved nothing: %v", statErr)
 	}
 	if res.ErrMsg != "not logged in" {
 		t.Errorf("ErrMsg = %q, want the stream error to survive the timeout", res.ErrMsg)
@@ -172,14 +205,19 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'`)
 		if _, err := r.Run(context.Background(), RunSpec{
 			Args: []string{"x"}, Dir: t.TempDir(),
 			TranscriptPath: filepath.Join(t.TempDir(), "t.jsonl"),
-			Timeout:        10 * time.Second,
+			// Well above the wall below, so a run that finishes normally is
+			// never mistaken for a hang and a genuine hang is still caught.
+			Timeout: 120 * time.Second,
 		}); err != nil {
 			t.Errorf("Run: %v", err)
 		}
 	}()
+	// This is a deadlock detector, not a latency budget: the distinction it
+	// draws is "returns" versus "never returns". A tight bound here buys
+	// nothing and costs a flake on a loaded machine.
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("Run blocked: stdin was not closed")
 	}
 }
