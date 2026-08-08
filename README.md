@@ -24,6 +24,7 @@ Requires `claude`, `codex`, `git`, and `gh` on PATH.
     overseer status                     # same information as a table
     overseer repos                      # per-repository time, turns and usage
     overseer backlog                    # what each repository still has waiting
+    overseer new ~/code/thing -brief "…"  # create a project and design it
     overseer stop 3                     # park a task; -now kills the agent
     overseer start 3                    # put it back to work
     overseer restart 3                  # run it again, on a fresh branch
@@ -133,6 +134,50 @@ the daemon at a new host is deliberate, not a dropdown.
 loop running. That is the strictest setting and the default. If a task starts
 burning iterations on style nits, set `blocking_severity: major` on that task
 in the batch file rather than babysitting it.
+
+## Designing something, and starting a project
+
+**Design something** on the dashboard opens a conversation with an architect.
+You say what you want; it asks what it actually needs to know, says what it
+would build, and disagrees where it disagrees. When you accept, it writes the
+design down and breaks it into tasks.
+
+    you:        a CLI that syncs S3 buckets one way, resumable. Go, no deps.
+    architect:  Resumable across what — a killed process, or a machine that
+                comes back a day later? And is "one way" a mirror or an append?
+    you:        a day later. append only — no delete at all, not even a flag.
+    architect:  Then the manifest lives beside the destination, so any machine
+                can pick up where any other left off. Three pieces: …
+    you:        Accept
+
+That works two ways.
+
+**For a repository that exists**, it reads the code first, so its questions are
+grounded in what is actually there — and it reads it *read-only*, so a
+conversation cannot leave a branch, a stash or an edit behind in a tree you only
+asked it to think about. Accepting gives you the task list, and the tasks cite
+real files.
+
+**For a new project**, give it a path instead. The directory is created and
+initialised before the conversation starts, so there is somewhere real to work.
+Accepting writes `DESIGN.md`, scaffolds the project, and *then* proposes the
+tasks against what was actually built.
+
+### Why the scaffold is not a task
+
+Because `done` means "draft pull request opened", not "merged". Every task cuts
+its worktree from the default branch, so a scaffold task would leave its
+`go.mod` on an unmerged branch while every task that depended on it started from
+an empty base and built on nothing.
+
+So the scaffold is one turn, before anything is queued, committed straight to
+the default branch. It is the only agent turn that is not reviewed, and it is
+deliberately narrow: the layout, the manifest, something that builds, a test
+command that works, and a README. The features are tasks, and they get the whole
+loop. You can read the whole thing in the Diff tab before queueing anything.
+
+The architect is its own configurable role, defaulting to the strongest model —
+this is the conversation that decides what everything else builds.
 
 ## Analysing a repository
 
