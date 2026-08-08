@@ -215,7 +215,7 @@ func TestVerifyGatePassesAndTaskCompletes(t *testing.T) {
 		if s.Agent == "verify" && verifyAt < 0 {
 			verifyAt = i
 		}
-		if s.Agent == "codex" && s.Phase == "exec" && reviewAt < 0 {
+		if s.Agent == "review" && s.Phase == "exec" && reviewAt < 0 {
 			reviewAt = i
 		}
 	}

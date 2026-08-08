@@ -20,7 +20,7 @@ func TestSandboxSpecNeverExposesTheDatabase(t *testing.T) {
 	task.WorktreeDir = filepath.Join(t.TempDir(), "wt")
 
 	for _, agentName := range []string{"claude", "codex"} {
-		spec := h.eng.sandboxSpec(task, agentName)
+		spec := h.eng.sandboxSpec(task, agentName, agentName == "claude")
 		for _, m := range spec.Mounts {
 			if strings.HasSuffix(m.Src, ".db") {
 				t.Errorf("%s: the database is mounted at %s", agentName, m.Src)
@@ -61,7 +61,7 @@ func TestSandboxSpecMarksAgentConfigOptional(t *testing.T) {
 		},
 	}
 	for agentName, paths := range mustBeOptional {
-		spec := h.eng.sandboxSpec(task, agentName)
+		spec := h.eng.sandboxSpec(task, agentName, agentName == "claude")
 		byDest := map[string]sandbox.Mount{}
 		for _, m := range spec.Mounts {
 			byDest[m.Dest] = m
@@ -100,7 +100,7 @@ func TestSandboxSpecUsesResolvedGitDirsNotRepoPath(t *testing.T) {
 	task.GitCommonDir = "/real/primary/.git"
 	task.GitAdminDir = "/real/primary/.git/worktrees/resolved-dirs"
 
-	spec := h.eng.sandboxSpec(task, "claude")
+	spec := h.eng.sandboxSpec(task, "claude", true)
 	var paths []string
 	for _, m := range spec.Mounts {
 		paths = append(paths, m.Src)
@@ -120,7 +120,7 @@ func TestSandboxSpecGivesTheReviewerNoWriteAccess(t *testing.T) {
 	task := h.submit(t, "reviewer is read only")
 	task.WorktreeDir = filepath.Join(t.TempDir(), "wt")
 
-	spec := h.eng.sandboxSpec(task, "codex")
+	spec := h.eng.sandboxSpec(task, "codex", false)
 	for _, m := range spec.Mounts {
 		if m.Write && m.Dest == task.WorktreeDir {
 			t.Error("codex has write access to the worktree; the reviewer must never write")
@@ -146,7 +146,7 @@ func TestSandboxSpecNeverMakesTheRealStateDirWritable(t *testing.T) {
 		"claude": filepath.Join(home, ".claude"),
 		"codex":  filepath.Join(home, ".codex"),
 	} {
-		spec := h.eng.sandboxSpec(task, agentName)
+		spec := h.eng.sandboxSpec(task, agentName, agentName == "claude")
 
 		var stateMounted bool
 		for _, m := range spec.Mounts {
@@ -189,7 +189,7 @@ func TestSandboxSpecGivesClaudeJSONAPerTaskCopy(t *testing.T) {
 
 	realFile := filepath.Join(home, ".claude.json")
 	var found bool
-	for _, m := range h.eng.sandboxSpec(task, "claude").Mounts {
+	for _, m := range h.eng.sandboxSpec(task, "claude", true).Mounts {
 		if m.Dest != realFile {
 			continue
 		}
@@ -249,7 +249,7 @@ func TestSandboxSpecMountsToolchainCaches(t *testing.T) {
 	task := h.submit(t, "caches are mounted")
 	task.WorktreeDir = filepath.Join(t.TempDir(), "wt")
 
-	spec := h.eng.sandboxSpec(task, "claude")
+	spec := h.eng.sandboxSpec(task, "claude", true)
 	var gotBuild, gotMod bool
 	for _, m := range spec.Mounts {
 		if strings.HasSuffix(m.Src, "go-build") {
@@ -288,7 +288,7 @@ func TestSandboxSpecUsesOverseersOwnGoCachesNotTheOperatorsReal(t *testing.T) {
 	task := h.submit(t, "go cache is overseer owned")
 	task.WorktreeDir = filepath.Join(t.TempDir(), "wt")
 
-	spec := h.eng.sandboxSpec(task, "claude")
+	spec := h.eng.sandboxSpec(task, "claude", true)
 
 	realGoBuild := filepath.Join(home, ".cache", "go-build")
 	realGoMod := filepath.Join(home, "go", "pkg", "mod")
@@ -342,7 +342,7 @@ func TestSandboxSpecDoesNotMountCredentialsByDefault(t *testing.T) {
 		filepath.Join(home, ".gitconfig"),
 		filepath.Join(home, ".aws"),
 	}
-	for _, m := range h.eng.sandboxSpec(task, "claude").Mounts {
+	for _, m := range h.eng.sandboxSpec(task, "claude", true).Mounts {
 		for _, f := range forbidden {
 			if m.Src == f {
 				t.Errorf("%s is mounted by default", f)
@@ -419,7 +419,7 @@ func TestSandboxEnvAllowlistIsEnforced(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spec := h.eng.sandboxSpec(task, "claude")
+	spec := h.eng.sandboxSpec(task, "claude", true)
 	wrapper, _, err := sandbox.Select("bwrap", "bwrap")
 	if err != nil {
 		t.Fatal(err)

@@ -95,7 +95,7 @@ func TestAnalyseStoresTheProposedTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.eng.ConfigureProposal(ctx, p.ID, []string{"tech debt"}, "no vendored code", 12); err != nil {
+	if err := h.eng.ConfigureProposal(ctx, p.ID, []string{"tech debt"}, "no vendored code", 12, ""); err != nil {
 		t.Fatal(err)
 	}
 	done := waitForProposal(t, h, p.ID, store.ProposalReady, store.ProposalFailed)
@@ -144,7 +144,7 @@ func TestAnalyseFailsLoudlyOnAnUnusableResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12); err != nil {
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
 		t.Fatal(err)
 	}
 	done := waitForProposal(t, h, p.ID, store.ProposalFailed, store.ProposalReady)
@@ -168,7 +168,7 @@ func TestConfigureProposalRejectsAnAbsurdBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, n := range []int{0, -1, 41} {
-		if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", n); err == nil {
+		if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", n, ""); err == nil {
 			t.Errorf("max tasks %d should be refused", n)
 		}
 	}
@@ -182,7 +182,7 @@ func TestQueueProposalCreatesTasksAndWiresDependenciesByID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12); err != nil {
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForProposal(t, h, p.ID, store.ProposalReady)
@@ -241,7 +241,7 @@ func TestQueueProposalResolvesDependenciesEvenWhenTheSlugCollides(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12); err != nil {
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForProposal(t, h, p.ID, store.ProposalReady)
@@ -273,7 +273,7 @@ func TestQueueProposalDropsADependencyOnADeselectedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12); err != nil {
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForProposal(t, h, p.ID, store.ProposalReady)
@@ -315,7 +315,7 @@ func TestQueueProposalRefusesWhenNothingIsSelectedOrItIsNotReady(t *testing.T) {
 		t.Error("a draft proposal should not be queueable")
 	}
 
-	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12); err != nil {
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForProposal(t, h, p.ID, store.ProposalReady)
@@ -343,7 +343,7 @@ func TestRegenerateReplacesTheListAndAccumulatesSpend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12); err != nil {
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForProposal(t, h, p.ID, store.ProposalReady)
@@ -407,7 +407,7 @@ func TestAnalysisSandboxMountsTheRepositoryReadOnly(t *testing.T) {
 	// repository the operator only asked it to look at.
 	h := newHarness(t, "true", "true")
 	runDir := filepath.Join(h.eng.Cfg.ProposalsDir(), "1")
-	spec := h.eng.analysisSandboxSpec(h.repo, runDir)
+	spec := h.eng.analysisSandboxSpec(h.repo, runDir, "claude")
 
 	var sawRepo, sawRun bool
 	for _, m := range spec.Mounts {
@@ -450,7 +450,7 @@ func TestAnalysisSandboxLayersTheRealAgentConfigReadOnly(t *testing.T) {
 	}
 	h := newHarness(t, "true", "true")
 	runDir := filepath.Join(h.eng.Cfg.ProposalsDir(), "1")
-	spec := h.eng.analysisSandboxSpec(h.repo, runDir)
+	spec := h.eng.analysisSandboxSpec(h.repo, runDir, "claude")
 
 	realClaude := filepath.Join(home, ".claude")
 	for _, m := range spec.Mounts {

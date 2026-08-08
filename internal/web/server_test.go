@@ -32,7 +32,7 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(cfg, st, eng), st
+	return New(cfg, st, eng, filepath.Join(cfg.DataDir, "config.yaml")), st
 }
 
 func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {

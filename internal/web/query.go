@@ -33,6 +33,9 @@ type Query struct {
 	// NoToast suppresses the parked-task nudge once the operator has
 	// dismissed it.
 	NoToast bool
+	// Saved marks the redirect after a settings write, so the pane can say so
+	// without a second source of truth for "did that work".
+	Saved bool
 	// Wizard is the open repository analysis, or zero for none. It is part of
 	// the URL for the same reason everything else here is: the analysis takes
 	// minutes, the page reloads on every state event while it runs, and a
@@ -93,10 +96,11 @@ func ParseQuery(r *http.Request) Query {
 		}
 	}
 	switch q.Overlay {
-	case "cli", "add":
+	case "cli", "add", "settings":
 	default:
 		q.Overlay = ""
 	}
+	q.Saved = v.Get("saved") == "1"
 	for _, s := range strings.Split(v.Get("bulk"), ",") {
 		if id, err := strconv.ParseInt(s, 10, 64); err == nil && id > 0 {
 			q.Bulk = append(q.Bulk, id)
@@ -149,6 +153,9 @@ func (q Query) URL(pairs ...any) string {
 	if q.Wizard != 0 {
 		v.Set("wizard", strconv.FormatInt(q.Wizard, 10))
 	}
+	if q.Saved {
+		v.Set("saved", "1")
+	}
 	if q.NoToast {
 		v.Set("toast", "0")
 	}
@@ -199,6 +206,8 @@ func (q *Query) set(key string, val any) {
 		q.Bulk = nil
 	case "toast":
 		q.NoToast = !toBool(val)
+	case "saved":
+		q.Saved = toBool(val)
 	}
 }
 

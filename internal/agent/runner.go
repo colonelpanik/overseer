@@ -48,6 +48,12 @@ type RunSpec struct {
 	Sandbox sandbox.Wrapper
 	// SandboxSpec describes what the sandbox exposes.
 	SandboxSpec sandbox.Spec
+	// Env are per-run environment overrides — how a provider points a CLI at
+	// a particular endpoint. They apply in both modes: merged into the
+	// sandbox spec when confined, layered over the process environment when
+	// not. Values are credentials, so they are never logged and never written
+	// to the transcript.
+	Env map[string]string
 }
 
 // Runner executes one agent CLI and normalises its output.
@@ -104,11 +110,36 @@ func (r *Runner) Run(ctx context.Context, spec RunSpec) (Result, error) {
 	defer cancel()
 
 	bin, argv := r.Bin, spec.Args
+	sbSpec := spec.SandboxSpec
+	if len(spec.Env) > 0 {
+		// Copy before merging: the spec's map belongs to the caller, and one
+		// task's credentials must not leak into another's spec.
+		merged := make(map[string]string, len(sbSpec.Env)+len(spec.Env))
+		for k, v := range sbSpec.Env {
+			merged[k] = v
+		}
+		for k, v := range spec.Env {
+			merged[k] = v
+		}
+		sbSpec.Env = merged
+	}
 	if spec.Sandbox != nil {
-		bin, argv = spec.Sandbox.Wrap(bin, argv, spec.SandboxSpec)
+		bin, argv = spec.Sandbox.Wrap(bin, argv, sbSpec)
 	}
 	cmd := exec.Command(bin, argv...)
 	cmd.Dir = spec.Dir
+	// bubblewrap clears the environment and rebuilds it from the spec, so the
+	// merge above is enough there. The passthrough wrapper does neither — it
+	// hands the argv straight to exec — so an unsandboxed run needs the
+	// overrides layered onto the inherited environment here, or a configured
+	// provider would silently have no effect with `sandbox: off`.
+	if len(spec.Env) > 0 && (spec.Sandbox == nil || spec.Sandbox.Name() == "off") {
+		env := os.Environ()
+		for k, v := range spec.Env {
+			env = append(env, k+"="+v)
+		}
+		cmd.Env = env
+	}
 	// Stdin must be an immediately-EOF reader: codex exec appends piped
 	// stdin to the prompt and blocks waiting for EOF.
 	cmd.Stdin = strings.NewReader("")

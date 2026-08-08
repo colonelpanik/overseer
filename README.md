@@ -69,8 +69,58 @@ bwrap_bin: bwrap
 verify_command: ""
 run_cap_usd: 0           # advisory, 0 disables
 task_cap_usd: 0          # advisory default per task, 0 disables
-analysis_model: claude-sonnet-5   # drives the repo-analysis wizard
 ```
+
+## Models and providers
+
+Three jobs, each independently configurable: **code** writes the plan and the
+implementation, **review** judges them and produces the verdict, **analyse**
+reads a repository for the wizard. Each binds to an agent CLI, an endpoint and
+a model.
+
+```yaml
+providers:
+  anthropic:                       # configured by default
+    kind: anthropic
+    key_env: ANTHROPIC_API_KEY
+    models: [claude-opus-5, claude-sonnet-5, claude-haiku-4-5]
+  inhouse:
+    kind: openai
+    base_url: https://llm.dc.internal/v1
+    key_env: DC_LLM_KEY            # the NAME of a variable, never a key
+    models: [qwen3-coder-480b]
+
+roles:
+  code:    {agent: claude, provider: anthropic, model: claude-opus-5}
+  review:  {agent: codex,  provider: inhouse,   model: qwen3-coder-480b}
+  analyse: {agent: claude, provider: anthropic, model: claude-sonnet-5}
+```
+
+Providers are additive: a file naming one in-house endpoint keeps the vendor
+ones. Absent roles keep their defaults, which are exactly the behaviour
+overseer had before roles existed.
+
+**A role may use either CLI.** Review with Claude, code through an
+OpenAI-compatible endpoint, whatever fits. The one constraint is protocol —
+`claude` talks to an Anthropic-shaped endpoint and `codex` to an OpenAI-shaped
+one — and a mismatch is refused at load, not discovered halfway through a
+paid-for task. `kind: openai` is any OpenAI-compatible endpoint: your own
+gateway, a vLLM or LiteLLM deployment, or an upstream vendor.
+
+**Keys are never stored.** A provider names the environment variable that holds
+one; overseer reads it when it launches an agent and passes it through as that
+CLI's own credential. Nothing lands in the config file, the database, or a log.
+The dashboard shows whether each variable is set, because a missing key would
+otherwise surface as an authentication failure that pauses the whole run.
+
+`analysis_model` still works and is applied to `roles.analyse.model`.
+
+**Models** on the dashboard shows the roles and providers, lets you repoint a
+role, and writes the change back to the config file — editing only the
+`providers:` and `roles:` keys, so the rest of your file keeps its comments and
+ordering. A change applies to the next agent turn; steps already running keep
+the role they started with. Adding a provider stays a config-file edit: pointing
+the daemon at a new host is deliberate, not a dropdown.
 
 `blocking_severity: any` means every Codex finding, including nits, keeps the
 loop running. That is the strictest setting and the default. If a task starts
@@ -111,9 +161,10 @@ Three things are true of the analysis and worth knowing:
 - **It costs money and the dashboard says so.** Analysis spend is part of the
   run total in the header, not a separate figure you have to go looking for.
 
-`analysis_model` picks the model (default `claude-sonnet-5`). It is a separate
-knob from whatever runs the loop: the analysis reads once and writes nothing,
-so it is worth spending less on than the turns that produce the change.
+The **analyse** role picks the model (see Models and providers above), and the
+wizard's own dropdown can override it for a single run. It is a separate knob
+from whatever runs the loop: the analysis reads once and writes nothing, so it
+is worth spending less on than the turns that produce the change.
 
 ## Spend caps
 

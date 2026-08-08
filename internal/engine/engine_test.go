@@ -175,7 +175,9 @@ func TestRunTaskConvergesFirstTimeAndOpensDraftPR(t *testing.T) {
 	if len(steps) != 4 {
 		t.Fatalf("recorded %d steps, want 4: %+v", len(steps), steps)
 	}
-	wantAgents := []string{"claude", "codex", "claude", "codex"}
+	// Steps record the ROLE, not the CLI: with roles free to pick either
+	// agent, "claude" stopped meaning "the coder".
+	wantAgents := []string{"code", "review", "code", "review"}
 	for i, want := range wantAgents {
 		if steps[i].Agent != want {
 			t.Errorf("step %d agent = %q, want %q", i, steps[i].Agent, want)
@@ -354,8 +356,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(steps) == 0 || steps[0].Agent != "claude" || steps[0].Phase != "plan" {
-		t.Fatalf("steps[0] = %+v, want the retried claude plan step", steps)
+	if len(steps) == 0 || steps[0].Agent != "code" || steps[0].Phase != "plan" {
+		t.Fatalf("steps[0] = %+v, want the retried plan step", steps)
 	}
 	plan := steps[0]
 	const wantInput, wantOutput = 40 + 5, 20 + 2
@@ -550,7 +552,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
 		}
 		found := 0
 		for _, step := range steps {
-			if step.Agent != "codex" {
+			if step.Agent != "review" {
 				continue
 			}
 			findings, err := h.st.ListFindings(ctx, step.ID)
@@ -595,8 +597,8 @@ func TestFailTaskClosesOutAGenuineHarnessError(t *testing.T) {
 	// the whole suite. This test forces the one kind of error dispatch can
 	// still surface: a harness-level failure to even write the transcript.
 	//
-	// The first claude plan step always writes to
-	// "<rundir>/plan-1-claude.jsonl". Pre-creating a directory at that exact
+	// The first plan step always writes to "<rundir>/plan-1-code.jsonl" — the
+	// transcript is named for the ROLE. Pre-creating a directory at that exact
 	// path makes Runner.Run's os.OpenFile fail with "is a directory" — a
 	// genuine error, not an agent failure — after the step has already been
 	// recorded as "running" in the store. That is exactly the situation
@@ -611,7 +613,7 @@ func TestFailTaskClosesOutAGenuineHarnessError(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	transcript := filepath.Join(runDir, "plan-1-claude.jsonl")
+	transcript := filepath.Join(runDir, "plan-1-code.jsonl")
 	if err := os.Mkdir(transcript, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -20,18 +20,26 @@ var templateFS embed.FS
 
 // Server serves the dashboard.
 type Server struct {
-	cfg   config.Config
-	store *store.Store
-	eng   *engine.Engine
-	tpl   *template.Template
-	css   []byte
-	hub   *Hub
+	// cfg is the configuration as loaded at startup and never mutated. The
+	// two tables the settings pane can change — providers and roles — live
+	// on the engine instead, behind its lock, because worker goroutines read
+	// them on every agent invocation.
+	cfg config.Config
+	// cfgPath is the file the settings pane writes to. Empty means the
+	// daemon was started without one, and the pane is read-only.
+	cfgPath string
+	store   *store.Store
+	eng     *engine.Engine
+	tpl     *template.Template
+	css     []byte
+	hub     *Hub
 }
 
 // New builds a Server with its templates parsed and its SSE hub wired to the
-// engine's change hook.
-func New(cfg config.Config, st *store.Store, eng *engine.Engine) *Server {
-	s := &Server{cfg: cfg, store: st, eng: eng, hub: NewHub()}
+// engine's change hook. cfgPath is the config file the settings pane edits;
+// pass "" for a daemon with no file to write back to.
+func New(cfg config.Config, st *store.Store, eng *engine.Engine, cfgPath string) *Server {
+	s := &Server{cfg: cfg, store: st, eng: eng, hub: NewHub(), cfgPath: cfgPath}
 	s.tpl = template.Must(template.New("dashboard").
 		Funcs(templateFuncs()).
 		ParseFS(templateFS, "templates/dashboard.html"))
@@ -85,6 +93,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /task/{id}/cap", s.requireSameOrigin(s.handleCap))
 	mux.HandleFunc("POST /task/{id}/release", s.requireSameOrigin(s.handleRelease))
 	mux.HandleFunc("POST /resume", s.requireSameOrigin(s.handleResume))
+	mux.HandleFunc("POST /settings", s.requireSameOrigin(s.handleSettings))
 	mux.HandleFunc("POST /analyse", s.requireSameOrigin(s.handleAnalyse))
 	mux.HandleFunc("POST /analyse/{id}/focus", s.requireSameOrigin(s.handleAnalyseFocus))
 	mux.HandleFunc("POST /analyse/{id}/regenerate", s.requireSameOrigin(s.handleAnalyseRegenerate))

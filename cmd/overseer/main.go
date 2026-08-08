@@ -62,7 +62,7 @@ func run(args []string) error {
 
 	switch args[0] {
 	case "serve":
-		return cmdServe(cfg)
+		return cmdServe(cfg, *configPath)
 	case "submit":
 		return cmdSubmit(cfg, fs.Arg(0))
 	case "status":
@@ -106,7 +106,7 @@ func open(cfg config.Config) (*store.Store, *engine.Engine, error) {
 // next `overseer serve`'s Recover() cleans up the interrupted step anyway.
 const shutdownGrace = 10 * time.Second
 
-func cmdServe(cfg config.Config) error {
+func cmdServe(cfg config.Config, configPath string) error {
 	// Taken before the store even opens: two daemons sharing one data dir
 	// each run Recover() and sweep the other's live steps to "interrupted",
 	// both claim the same task, and worktree.Create's adopt() then hands the
@@ -132,7 +132,7 @@ func cmdServe(cfg config.Config) error {
 		return err
 	}
 
-	srv := web.New(cfg, st, eng)
+	srv := web.New(cfg, st, eng, configPath)
 	errc := make(chan error, 2)
 	go func() { errc <- srv.ListenAndServe(ctx) }()
 	go func() { errc <- eng.Run(ctx) }()

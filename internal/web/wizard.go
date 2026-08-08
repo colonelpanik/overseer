@@ -56,7 +56,8 @@ func (s *Server) handleAnalyseFocus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = s.eng.ConfigureProposal(r.Context(), id, focus,
-		strings.TrimSpace(r.FormValue("notes")), maxTasks)
+		strings.TrimSpace(r.FormValue("notes")), maxTasks,
+		strings.TrimSpace(r.FormValue("model")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

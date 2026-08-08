@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"overseer/internal/agent"
+	"overseer/internal/config"
 	"overseer/internal/sandbox"
 	"overseer/internal/store"
 	"overseer/internal/worktree"
@@ -105,7 +106,7 @@ func (e *Engine) clone(ctx context.Context, proposalID int64, url string) {
 
 // ConfigureProposal saves the operator's steering and kicks the analysis off.
 func (e *Engine) ConfigureProposal(ctx context.Context, proposalID int64,
-	focus []string, notes string, maxTasks int) error {
+	focus []string, notes string, maxTasks int, model string) error {
 
 	p, err := e.Store.GetProposal(ctx, proposalID)
 	if err != nil {
@@ -121,6 +122,9 @@ func (e *Engine) ConfigureProposal(ctx context.Context, proposalID int64,
 	p.Focus = focus
 	p.Notes = notes
 	p.MaxTasks = maxTasks
+	if model != "" {
+		p.Model = model
+	}
 	p.State = store.ProposalAnalysing
 	p.ErrMsg = ""
 	if err := e.Store.SaveProposal(ctx, p); err != nil {
@@ -260,11 +264,16 @@ func (e *Engine) runAnalysis(ctx context.Context, p *store.Proposal, prompt stri
 }
 
 func (e *Engine) runAnalysisAgent(ctx context.Context, p *store.Proposal, prompt string, attempt int) (agent.Result, error) {
+	role, err := e.resolveRole(config.RoleAnalyse)
+	if err != nil {
+		return agent.Result{ErrMsg: err.Error()}, nil
+	}
+
 	runDir := e.proposalDir(p.ID)
 	if err := sandbox.EnsureDirs(runDir); err != nil {
 		return agent.Result{}, err
 	}
-	if err := prepareAgentStateIn(runDir, "claude"); err != nil {
+	if err := prepareAgentStateIn(runDir, role.Agent); err != nil {
 		return agent.Result{}, err
 	}
 
@@ -277,15 +286,21 @@ func (e *Engine) runAnalysisAgent(ctx context.Context, p *store.Proposal, prompt
 		e.notifyProposal()
 	}
 
-	args := agent.ClaudeArgs(agent.ClaudeOpts{Prompt: prompt, Model: p.Model})
-	return e.Claude.Run(ctx, agent.RunSpec{
-		Args:           args,
+	// The proposal's own model wins: the operator may have picked it in the
+	// wizard for this analysis, and the role's model is only the default the
+	// wizard offered.
+	if p.Model != "" {
+		role.Model = p.Model
+	}
+	return role.Runner.Run(ctx, agent.RunSpec{
+		Args:           role.args(prompt, "", "", ""),
 		Dir:            p.RepoPath,
 		TranscriptPath: transcript,
 		Timeout:        analysisTimeout,
 		Attempt:        attempt,
 		Sandbox:        e.Sandbox,
-		SandboxSpec:    e.analysisSandboxSpec(p.RepoPath, runDir),
+		SandboxSpec:    e.analysisSandboxSpec(p.RepoPath, runDir, role.Agent),
+		Env:            role.Env,
 	})
 }
 

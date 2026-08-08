@@ -129,6 +129,12 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 		}
 	}
 
+	if q.Overlay == "settings" {
+		settings := s.buildSettings(q)
+		settings.Saved = q.Saved
+		d.Settings = &settings
+	}
+
 	if q.Wizard != 0 {
 		wiz, err := s.buildWizard(ctx, q)
 		if err != nil {
@@ -147,9 +153,10 @@ func (s *Server) buildWizard(ctx context.Context, q Query) (*WizardView, error) 
 		return &WizardView{
 			ID:       WizardNew,
 			Step:     StepSource,
-			Model:    s.cfg.AnalysisModel,
+			Model:    s.analyseModel(),
 			MaxTasks: 12,
 			Focus:    append([]FocusChoice(nil), FocusAreas...),
+			Models:   s.analyseModels(""),
 			CloseURL: q.URL("wizard", 0),
 		}, nil
 	}
@@ -172,9 +179,11 @@ func (s *Server) buildWizard(ctx context.Context, q Query) (*WizardView, error) 
 
 	var live *LivePane
 	if p.State == store.ProposalAnalysing && p.TranscriptPath != "" {
-		live = transcriptPane(p.TranscriptPath, "claude · analysis", true)
+		live = transcriptPane(p.TranscriptPath, "analysis", true)
 	}
-	return buildWizard(p, rows, live, q), nil
+	w := buildWizard(p, rows, live, q)
+	w.Models = s.analyseModels(p.Model)
+	return w, nil
 }
 
 // transcriptPane renders a running transcript for the live view. Both the

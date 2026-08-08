@@ -60,6 +60,12 @@ type Engine struct {
 	// pauseReason is non-empty when the whole run is halted, which happens
 	// on an authentication failure: every task would fail identically.
 	pauseReason string
+
+	// providers and roles override Cfg's copies when the operator has changed
+	// them from the dashboard. Guarded by mu because worker goroutines read
+	// them on every agent invocation.
+	providers map[string]config.Provider
+	roles     map[string]config.Role
 }
 
 // New builds an Engine and materialises the verdict schema on disk.
@@ -412,8 +418,11 @@ func (e *Engine) setupWorktree(ctx context.Context, task *store.Task) (*loop.Out
 // engine commits rather than instructing the agent to, so the branch state
 // is deterministic and a forgetful turn cannot lose work.
 func (e *Engine) runClaude(ctx context.Context, task *store.Task, phase, prompt, resume string) (*loop.Outcome, error) {
-	args := agent.ClaudeArgs(agent.ClaudeOpts{Prompt: prompt, ResumeSessionID: resume})
-	res, _, err := e.runAgent(ctx, task, phase, "claude", e.Claude, args)
+	role, err := e.resolveRole(config.RoleCode)
+	if err != nil {
+		return &loop.Outcome{Failed: true, ErrMsg: err.Error()}, nil
+	}
+	res, _, err := e.runAgent(ctx, task, phase, role, role.args(prompt, resume, "", ""))
 	if err != nil {
 		return nil, err
 	}
@@ -430,14 +439,25 @@ func (e *Engine) runClaude(ctx context.Context, task *store.Task, phase, prompt,
 
 // runCodex runs one review and parses its verdict from the last-message file.
 func (e *Engine) runCodex(ctx context.Context, task *store.Task, phase, prompt string) (*loop.Outcome, error) {
-	lastPath := filepath.Join(e.runDir(*task),
-		fmt.Sprintf("%s-%d-verdict.json", phase, task.Iteration))
-	args := agent.CodexArgs(agent.CodexOpts{
-		Prompt:          prompt,
-		SchemaPath:      e.SchemaPath,
-		LastMessagePath: lastPath,
-	})
-	res, step, err := e.runAgent(ctx, task, phase, "codex", e.Codex, args)
+	role, err := e.resolveRole(config.RoleReview)
+	if err != nil {
+		return &loop.Outcome{Failed: true, ErrMsg: err.Error()}, nil
+	}
+
+	// Only `codex exec` takes --output-schema and --output-last-message. A
+	// reviewer running through `claude` gets the same contract stated in its
+	// prompt, and its verdict is read from the final message. ParseVerdict is
+	// the guarantee in both cases.
+	var schemaPath, lastPath string
+	if role.structured() {
+		schemaPath = e.SchemaPath
+		lastPath = filepath.Join(e.runDir(*task),
+			fmt.Sprintf("%s-%d-verdict.json", phase, task.Iteration))
+	} else {
+		prompt = withInlineSchema(prompt)
+	}
+
+	res, step, err := e.runAgent(ctx, task, phase, role, role.args(prompt, "", schemaPath, lastPath))
 	if err != nil {
 		return nil, err
 	}
@@ -445,34 +465,22 @@ func (e *Engine) runCodex(ctx context.Context, task *store.Task, phase, prompt s
 		return &loop.Outcome{Failed: true, ErrMsg: res.ErrMsg}, nil
 	}
 
-	raw, err := os.ReadFile(lastPath)
-	if err != nil {
-		// Fall back to the last agent message; either way, no verdict means
-		// no approval.
-		raw = []byte(res.FinalText)
-	}
-	verdict, parseErr := agent.ParseVerdict(raw)
+	verdict, parseErr := agent.ParseVerdict(reviewOutput(lastPath, res.FinalText))
 	if parseErr != nil {
 		// One stricter re-ask before giving up. A second failure fails the
 		// task: unparseable output is never approval.
 		retryPrompt := prompt + "\n\nYour previous response could not be parsed: " +
 			parseErr.Error() + "\nRespond with the JSON object required by the " +
 			"output schema and nothing else."
-		args = agent.CodexArgs(agent.CodexOpts{
-			Prompt: retryPrompt, SchemaPath: e.SchemaPath, LastMessagePath: lastPath,
-		})
-		res, step, err = e.runAgent(ctx, task, phase, "codex", e.Codex, args)
+		res, step, err = e.runAgent(ctx, task, phase, role,
+			role.args(retryPrompt, "", schemaPath, lastPath))
 		if err != nil {
 			return nil, err
 		}
-		raw, readErr := os.ReadFile(lastPath)
-		if readErr != nil {
-			raw = []byte(res.FinalText)
-		}
-		verdict, parseErr = agent.ParseVerdict(raw)
+		verdict, parseErr = agent.ParseVerdict(reviewOutput(lastPath, res.FinalText))
 		if parseErr != nil {
 			return &loop.Outcome{Failed: true,
-				ErrMsg: "codex returned no parseable verdict: " + parseErr.Error()}, nil
+				ErrMsg: role.Agent + " returned no parseable verdict: " + parseErr.Error()}, nil
 		}
 	}
 
@@ -490,9 +498,15 @@ func (e *Engine) runCodex(ctx context.Context, task *store.Task, phase, prompt s
 // above 1, several tasks run runAgent concurrently, and a field on the
 // shared Engine would let one task's review overwrite another's step
 // between the call returning and the verdict being recorded.
-func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase, name string,
-	runner *agent.Runner, args []string) (agent.Result, store.Step, error) {
+func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
+	role resolved, args []string) (agent.Result, store.Step, error) {
 
+	// The step records the ROLE, not the CLI. A timeline that said "codex"
+	// for a review and "codex" for the implementation would be unreadable
+	// once both roles can run through the same binary, and every reader of
+	// the steps table — the two-lane timeline, the convergence chart, the
+	// oscillation fingerprint — keys off this value.
+	name := role.Role
 	transcript := filepath.Join(e.runDir(*task),
 		fmt.Sprintf("%s-%d-%s.jsonl", phase, task.Iteration, name))
 
@@ -502,7 +516,9 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase, name str
 	if err := sandbox.EnsureDirs(e.runDir(*task)); err != nil {
 		return agent.Result{}, store.Step{}, err
 	}
-	if err := e.prepareAgentState(*task, name); err != nil {
+	// State and mounts are keyed by the CLI, which is what actually reads
+	// them, not by the role.
+	if err := e.prepareAgentState(*task, role.Agent); err != nil {
 		return agent.Result{}, store.Step{}, err
 	}
 
@@ -522,14 +538,15 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase, name str
 	var spent agent.Result
 
 	for attempt := 1; ; attempt++ {
-		res, err = runner.Run(ctx, agent.RunSpec{
+		res, err = role.Runner.Run(ctx, agent.RunSpec{
 			Args:           args,
 			Dir:            task.WorktreeDir,
 			TranscriptPath: transcript,
 			Timeout:        e.Cfg.StepTimeout,
 			Attempt:        attempt,
 			Sandbox:        e.Sandbox,
-			SandboxSpec:    e.sandboxSpec(*task, name),
+			SandboxSpec:    e.sandboxSpec(*task, role.Agent, role.Writable),
+			Env:            role.Env,
 		})
 		if err != nil {
 			return agent.Result{}, store.Step{}, err
@@ -684,12 +701,16 @@ func (e *Engine) notify(taskID int64) {
 // The rule is: an empty tmpfs over $HOME, then re-expose exactly what the
 // agent must have. Anything not listed here — other repositories, dotfiles,
 // SSH keys, the overseer database — is simply absent.
-func (e *Engine) sandboxSpec(task store.Task, agentName string) sandbox.Spec {
+// sandboxSpec confines one agent run. writable says whether the worktree is
+// exposed read-write, and it comes from the ROLE rather than being inferred
+// from the agent's name: with roles free to pick either CLI, "claude means the
+// coder" stopped being true, and a reviewer that could write would be able to
+// edit the very diff it was asked to judge.
+func (e *Engine) sandboxSpec(task store.Task, agentName string, writable bool) sandbox.Spec {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
 	}
-	writable := agentName == "claude" // the reviewer never writes
 
 	spec := sandbox.Spec{
 		HomeDir: home,
@@ -839,7 +860,7 @@ func (e *Engine) toolchainMounts(spec sandbox.Spec) sandbox.Spec {
 // writable path is the proposal's own run directory, for the transcript. An
 // analysis that could write would be able to leave a branch, a stash or an
 // edit behind in a repository the operator only asked it to read.
-func (e *Engine) analysisSandboxSpec(repoPath, runDir string) sandbox.Spec {
+func (e *Engine) analysisSandboxSpec(repoPath, runDir, agentName string) sandbox.Spec {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
@@ -851,10 +872,10 @@ func (e *Engine) analysisSandboxSpec(repoPath, runDir string) sandbox.Spec {
 		PathEnv: os.Getenv("PATH"),
 		Env:     sandbox.AllowedEnv(os.Environ(), e.Cfg.SandboxEnvPassthrough),
 	}
-	for _, m := range sandbox.BinMounts(e.Cfg.ClaudeBin) {
+	for _, m := range sandbox.BinMounts(e.Cfg.Bin(agentName)) {
 		spec = spec.AddAt(m.Src, m.Dest, m.Write)
 	}
-	spec = agentHomeMounts(spec, home, "claude", runDir)
+	spec = agentHomeMounts(spec, home, agentName, runDir)
 	spec = spec.
 		Add(repoPath, false).
 		Add(runDir, true)

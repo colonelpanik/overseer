@@ -153,7 +153,9 @@ func (e *Engine) execVerify(ctx context.Context, task store.Task, command string
 			return VerifyResult{Command: command, ExitCode: -1,
 				Output: fmt.Sprintf("overseer: prepare sandbox: %v", err)}
 		}
-		bin, args = e.Sandbox.Wrap(bin, args, e.sandboxSpec(task, "claude"))
+		// Writable: the verify command builds and tests, which produces
+		// artefacts in the worktree.
+		bin, args = e.Sandbox.Wrap(bin, args, e.sandboxSpec(task, "claude", true))
 	}
 
 	cmd := exec.CommandContext(runCtx, bin, args...)

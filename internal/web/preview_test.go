@@ -45,6 +45,7 @@ func TestWritePreview(t *testing.T) {
 		"wizard-run.html":    "/?wizard=2",
 		"wizard-review.html": "/?wizard=3",
 		"wizard-failed.html": "/?wizard=4",
+		"settings.html":      "/?overlay=settings",
 	}
 	for name, path := range pages {
 		rec := httptest.NewRecorder()

@@ -22,6 +22,7 @@
     </div>
     <a class="btn btn-secondary btn-mono" href="{{.Q.URL "overlay" "cli"}}">$ overseer status</a>
     <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardNew}}">Analyse a repo</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "settings"}}">Models</a>
     <a class="btn btn-primary" href="{{.Q.URL "overlay" "add"}}">Queue task</a>
   </div>
 
@@ -505,8 +506,16 @@
               <input class="input" id="wmax" name="max_tasks" value="{{.MaxTasks}}" inputmode="numeric">
             </div>
             <div class="field">
-              <label>Model</label>
-              <input class="input" value="{{.Model}}" readonly>
+              <label for="wmodel">Model</label>
+              {{if .Models}}
+              <select class="input" id="wmodel" name="model">
+                {{range .Models}}
+                <option value="{{.Model}}" {{if .On}}selected{{end}}>{{.Provider}} / {{.Model}}</option>
+                {{end}}
+              </select>
+              {{else}}
+              <input class="input" id="wmodel" name="model" value="{{.Model}}" readonly>
+              {{end}}
             </div>
           </div>
         </div>
@@ -624,6 +633,90 @@
         </form>
       </div>
     {{end}}
+  </div>
+</div>
+{{end}}
+
+{{with .Settings}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Models and providers</h4>
+      <span class="small">{{if .Editable}}{{.Path}}{{else}}no config file to write to{{end}}</span>
+      <span class="spacer"></span>
+      <a class="btn btn-ghost" href="{{$.Q.URL "overlay" ""}}">close</a>
+    </div>
+
+    {{if .Saved}}
+    <div class="wizard-error" style="background:var(--color-surface);border-bottom-color:var(--color-divider)">
+      <span class="kicker" style="color:var(--color-text)">Saved</span>
+      <div>Written to the config file. Steps already running keep the role they started with.</div>
+    </div>
+    {{end}}
+
+    <form method="post" action="/settings">
+      <div class="body">
+        <div class="small">Each job in the loop picks a CLI, an endpoint and a model. A role can use either
+          CLI — the constraint is protocol: <span class="mono">claude</span> talks to an Anthropic-shaped
+          endpoint, <span class="mono">codex</span> to an OpenAI-shaped one, so only matching providers are offered.</div>
+
+        {{range .Roles}}
+        <div class="rolerow">
+          <div>
+            <div class="kicker">{{.Name}}</div>
+            <div class="small">{{.Description}}</div>
+            {{if .Warning}}<div class="small" style="color:var(--color-accent-800)">{{.Warning}}</div>{{end}}
+          </div>
+          <div class="field">
+            <label for="agent-{{.Name}}">Runs through</label>
+            <select class="input" id="agent-{{.Name}}" name="agent-{{.Name}}" {{if not $.Settings.Editable}}disabled{{end}}>
+              {{$cur := .Agent}}
+              {{range .Agents}}
+              <option value="{{.Label}}" {{if .On}}selected{{end}}>{{.Label}}</option>
+              {{end}}
+            </select>
+            <p class="muted" style="font-size:11px;margin:4px 0 0">changing this reloads the model list on save</p>
+          </div>
+          <div class="field">
+            <label for="model-{{.Name}}">Provider and model</label>
+            <select class="input" id="model-{{.Name}}" name="model-{{.Name}}" {{if not $.Settings.Editable}}disabled{{end}}>
+              {{range .Choices}}
+              <option value="{{.Value}}" {{if .On}}selected{{end}}>{{.Provider}} / {{.Model}}</option>
+              {{end}}
+            </select>
+          </div>
+        </div>
+        {{end}}
+
+        <div class="hr"></div>
+        <div class="kicker">Providers</div>
+        <div class="small">Endpoints are configured in the file, not here: pointing the daemon at a new host is
+          a deliberate edit, not a dropdown. Keys are never stored — each provider names the environment
+          variable that holds one.</div>
+        {{range .Providers}}
+        <div class="providerrow{{if not .KeyPresent}} missing{{end}}">
+          <div>
+            <div class="mono" style="font-size:13px">{{.Name}}</div>
+            <div class="small">{{.Kind}} · {{.Endpoint}}</div>
+          </div>
+          <div>
+            <div class="small">{{if .KeyEnv}}{{.KeyEnv}}{{else}}the CLI's own login{{end}}</div>
+            <div class="small">{{if .KeyPresent}}key present{{else}}<span style="color:var(--color-accent)">not set in the daemon's environment</span>{{end}}</div>
+          </div>
+          <div>
+            <div class="small">{{if .Models}}{{join ", " .Models}}{{else}}the CLI's default model{{end}}</div>
+            {{if .UsedBy}}<div class="small">used by {{join ", " .UsedBy}}</div>{{end}}
+          </div>
+        </div>
+        {{end}}
+      </div>
+      <div class="foot">
+        <span class="small">A change applies to the next agent turn; steps already running keep their role.</span>
+        <span class="spacer"></span>
+        <a class="btn btn-secondary" href="{{$.Q.URL "overlay" ""}}">Close</a>
+        <button class="btn btn-primary" type="submit" {{if not .Editable}}disabled{{end}}>Save</button>
+      </div>
+    </form>
   </div>
 </div>
 {{end}}

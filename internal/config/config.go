@@ -38,11 +38,18 @@ type Config struct {
 	RunCapUSD  float64 `yaml:"run_cap_usd"`
 	TaskCapUSD float64 `yaml:"task_cap_usd"`
 
-	// AnalysisModel drives the repository analysis behind the dashboard's
-	// wizard. It is a separate knob from whatever model runs the loop: the
-	// analysis reads a repository once and writes nothing, so it is worth
-	// spending less on than the turns that produce the actual change.
+	// AnalysisModel is the older, single-knob form of roles.analyse.model.
+	// It is still honoured so an existing config file keeps working, but
+	// roles wins when both are set.
 	AnalysisModel string `yaml:"analysis_model"`
+
+	// Providers are the endpoints overseer may point an agent CLI at, keyed
+	// by name. Absent keys keep their defaults, so a file that adds one
+	// in-house provider still has the vendor ones.
+	Providers map[string]Provider `yaml:"providers"`
+	// Roles bind each job in the loop — code, review, analyse — to an agent
+	// CLI, a provider and a model.
+	Roles map[string]Role `yaml:"roles"`
 
 	// Sandbox is auto, bwrap or off. auto uses bwrap when it works and
 	// warns loudly when it does not.
@@ -88,6 +95,8 @@ func Default() Config {
 		Sandbox:          "auto",
 		BwrapBin:         "bwrap",
 		AnalysisModel:    "claude-sonnet-5",
+		Providers:        defaultProviders(),
+		Roles:            defaultRoles(),
 		// These cover the common toolchains; a path that does not exist is
 		// skipped, so listing several is harmless.
 		//
@@ -119,14 +128,42 @@ func Load(path string) (Config, error) {
 		return c, fmt.Errorf("read config: %w", err)
 	}
 	// Unmarshalling into the already-populated struct leaves absent keys at
-	// their default values.
+	// their default values. For the provider and role maps that also means a
+	// file naming one provider keeps the defaults for the others, which is
+	// what an operator adding a single in-house endpoint expects.
 	if err := yaml.Unmarshal(raw, &c); err != nil {
 		return c, fmt.Errorf("parse config: %w", err)
 	}
+
+	// Decoding into the populated struct cannot tell an absent key from one
+	// the file set to the same value as the default, and the legacy
+	// analysis_model carry-over needs exactly that distinction. Decoding once
+	// more into a zero Config says which keys the file actually mentions.
+	var stated Config
+	if err := yaml.Unmarshal(raw, &stated); err != nil {
+		return c, fmt.Errorf("parse config: %w", err)
+	}
+	c.applyLegacyAnalysisModel(stated)
+
 	if err := c.validate(); err != nil {
 		return c, err
 	}
 	return c, nil
+}
+
+// applyLegacyAnalysisModel carries the older analysis_model key onto the
+// analyse role, so a config written before roles existed keeps behaving the
+// same way. An analyse role the file states explicitly wins over it.
+func (c *Config) applyLegacyAnalysisModel(stated Config) {
+	if stated.AnalysisModel == "" {
+		return
+	}
+	if r, ok := stated.Roles[RoleAnalyse]; ok && r.Model != "" {
+		return
+	}
+	role := c.Roles[RoleAnalyse]
+	role.Model = stated.AnalysisModel
+	c.Roles[RoleAnalyse] = role
 }
 
 func (c Config) validate() error {
@@ -153,8 +190,12 @@ func (c Config) validate() error {
 	if c.TaskCapUSD < 0 {
 		return fmt.Errorf("task_cap_usd %.2f must not be negative", c.TaskCapUSD)
 	}
-	return nil
+	return c.validateProviders()
 }
+
+// Validate exposes the same checks to callers that build a Config by hand,
+// such as the dashboard's settings pane before it writes anything to disk.
+func (c Config) Validate() error { return c.validate() }
 
 // RunsDir is where per-step agent transcripts are written.
 func (c Config) RunsDir() string { return filepath.Join(c.DataDir, "runs") }

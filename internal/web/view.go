@@ -329,6 +329,9 @@ type WizardView struct {
 	Focus    []FocusChoice
 	Notes    string
 	MaxTasks int
+	// Models are the (provider, model) pairs the analyse role may be pointed
+	// at for this one analysis, grouped by provider.
+	Models []ModelChoice
 
 	Waiting *WizardWaiting
 	Live    *LivePane
@@ -347,11 +350,13 @@ type WizardView struct {
 // goes.
 var FocusAreas = []FocusChoice{
 	{Label: "test coverage", Hint: "behaviour that nothing currently proves"},
-	{Label: "tech debt", Hint: "duplication, dead code, tangled boundaries"},
+	{Label: "correctness", Hint: "unhandled errors and broken edge cases"},
+	{Label: "DRY / KISS", Hint: "duplication, needless indirection, code that could be smaller"},
+	{Label: "tech debt", Hint: "dead code, tangled boundaries, abandoned migrations"},
 	{Label: "security", Hint: "unvalidated input, secret handling, permissions"},
 	{Label: "performance", Hint: "work repeated per request or per row"},
 	{Label: "documentation", Hint: "READMEs and comments the code has outgrown"},
-	{Label: "correctness", Hint: "unhandled errors and broken edge cases"},
+	{Label: "general suggestions", Hint: "anything worth doing that the other areas miss"},
 }
 
 // Dashboard is the whole page. There is only one page: the board and the task
@@ -379,9 +384,10 @@ type Dashboard struct {
 
 	Sel *Detail
 
-	CLIText string
-	Add     AddForm
-	Wizard  *WizardView
+	CLIText  string
+	Add      AddForm
+	Wizard   *WizardView
+	Settings *SettingsView
 }
 
 // buildWizard assembles the analysis wizard for the proposal in the URL.
@@ -870,7 +876,9 @@ func buildSteps(f taskFacts, steps []store.Step, byStep map[int64][]store.Findin
 			ToggleURL: q.URL("step", toggleStep(openStep, i)),
 			Err:       s.ErrMsg,
 		}
-		if s.Agent != "claude" {
+		// The lane is the role's, so a reviewer running through the same CLI
+		// as the coder still reads as a reviewer.
+		if !isCoder(s.Agent) {
 			card.Col = 2
 		}
 		if s.TranscriptPath != "" {
@@ -906,12 +914,28 @@ func toggleStep(open, i int) int {
 	return i
 }
 
+// Step agent values. A step records the ROLE it played, not the CLI that ran
+// it — with roles free to pick either agent, "claude" no longer means "the
+// coder". Databases written by an earlier build hold the CLI name instead, so
+// both spellings are recognised.
+const (
+	stepCoder    = "code"
+	stepReviewer = "review"
+	stepVerify   = "verify"
+)
+
+// isCoder reports whether a step is the one that writes the change.
+func isCoder(agent string) bool { return agent == stepCoder || agent == "claude" }
+
+// isReviewer reports whether a step produced a verdict on someone else's work.
+func isReviewer(agent string) bool { return agent == stepReviewer || agent == "codex" }
+
 // stepTitle says what a step did, built from what the store actually records.
 // There is no title column: inventing one at write time would freeze a
 // description the loop later contradicts.
 func stepTitle(t store.Task, s store.Step, prevBlocking int) string {
-	switch s.Agent {
-	case "claude":
+	switch {
+	case isCoder(s.Agent):
 		switch {
 		case s.Phase == "plan" && s.Iteration <= 1:
 			return "Wrote PLAN.md from the goal and constraints."
@@ -922,7 +946,7 @@ func stepTitle(t store.Task, s store.Step, prevBlocking int) string {
 		default:
 			return fmt.Sprintf("Resumed the same session with %s.", plural(prevBlocking, "finding"))
 		}
-	case "verify":
+	case s.Agent == stepVerify:
 		cmd := t.VerifyCommand
 		if cmd == "" {
 			cmd = "verify"
@@ -931,7 +955,7 @@ func stepTitle(t store.Task, s store.Step, prevBlocking int) string {
 			return cmd + " — exit 0"
 		}
 		return fmt.Sprintf("%s — exit %d", cmd, s.ExitCode)
-	case "codex":
+	case isReviewer(s.Agent):
 		if s.Phase == "plan" {
 			return "Reviewed PLAN.md against the goal."
 		}
