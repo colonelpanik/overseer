@@ -1,0 +1,219 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// Task is one unit of work: a goal against a repository, driven through the
+// plan and execute loops.
+type Task struct {
+	ID   int64
+	Slug string
+	// RepoID links the task to its registered repository. RepoPath stays
+	// alongside it as the resolved path, so every existing reader keeps
+	// working and the migration is additive.
+	RepoID           int64
+	RepoPath         string
+	Goal             string
+	Constraints      string
+	State            string
+	Phase            string
+	Iteration        int
+	MaxIterations    int
+	BlockingSeverity string
+	PlanSessionID    string
+	ExecSessionID    string
+	Branch           string
+	BaseRef          string
+	// GitCommonDir and GitAdminDir are resolved with rev-parse when the
+	// worktree is created, never assumed from RepoPath: a submitted path may
+	// itself be a linked worktree, where .git is a file.
+	GitCommonDir string
+	GitAdminDir  string
+	WorktreeDir  string
+	PRURL        string
+	ErrMsg       string
+	// VerifyCommand is run in the worktree after each implementation turn
+	// and must exit zero before the code review happens. Empty disables the
+	// gate.
+	VerifyCommand string
+	// FindingHashes records the blocking-findings fingerprint seen at each
+	// iteration of the current phase, for oscillation detection.
+	FindingHashes []string
+	// CostCapUSD is an advisory ceiling on this task's spend. Passing it
+	// raises a banner; it never stops a turn, because killing an agent
+	// mid-edit leaves the worktree in a state nobody asked for. Zero means no
+	// cap.
+	CostCapUSD float64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+const rfc3339 = time.RFC3339Nano
+
+// CreateTask inserts t and returns it with ID and timestamps populated.
+func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
+	now := time.Now().UTC()
+	t.CreatedAt, t.UpdatedAt = now, now
+	if t.MaxIterations == 0 {
+		t.MaxIterations = 10
+	}
+	if t.BlockingSeverity == "" {
+		t.BlockingSeverity = "any"
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO tasks (slug, repo_id, repo_path, goal, constraints, state, phase,
+			iteration, max_iterations, blocking_severity, plan_session_id,
+			exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
+			worktree_dir, pr_url, err_msg, verify_command,
+			finding_hashes, cost_cap_usd, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.Slug, t.RepoID, t.RepoPath, t.Goal, t.Constraints, t.State, t.Phase,
+		t.Iteration, t.MaxIterations, t.BlockingSeverity, t.PlanSessionID,
+		t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir, t.GitAdminDir,
+		t.WorktreeDir, t.PRURL, t.ErrMsg, t.VerifyCommand,
+		strings.Join(t.FindingHashes, "\n"), t.CostCapUSD,
+		t.CreatedAt.Format(rfc3339), t.UpdatedAt.Format(rfc3339))
+	if err != nil {
+		return Task{}, fmt.Errorf("insert task: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Task{}, fmt.Errorf("task id: %w", err)
+	}
+	t.ID = id
+	return t, nil
+}
+
+const taskColumns = `id, slug, repo_id, repo_path, goal, constraints, state, phase,
+	iteration, max_iterations, blocking_severity, plan_session_id,
+	exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
+	worktree_dir, pr_url, err_msg, verify_command, finding_hashes,
+	cost_cap_usd, created_at, updated_at`
+
+func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
+	var t Task
+	var hashes, created, updated string
+	err := sc.Scan(&t.ID, &t.Slug, &t.RepoID, &t.RepoPath, &t.Goal, &t.Constraints,
+		&t.State, &t.Phase, &t.Iteration, &t.MaxIterations,
+		&t.BlockingSeverity, &t.PlanSessionID, &t.ExecSessionID, &t.Branch,
+		&t.BaseRef, &t.GitCommonDir, &t.GitAdminDir,
+		&t.WorktreeDir, &t.PRURL, &t.ErrMsg, &t.VerifyCommand,
+		&hashes, &t.CostCapUSD, &created, &updated)
+	if err != nil {
+		return Task{}, err
+	}
+	if hashes != "" {
+		t.FindingHashes = strings.Split(hashes, "\n")
+	}
+	t.CreatedAt, err = time.Parse(rfc3339, created)
+	if err != nil {
+		return Task{}, fmt.Errorf("parse created_at: %w", err)
+	}
+	t.UpdatedAt, err = time.Parse(rfc3339, updated)
+	if err != nil {
+		return Task{}, fmt.Errorf("parse updated_at: %w", err)
+	}
+	return t, nil
+}
+
+// GetTask loads one task by ID.
+func (s *Store) GetTask(ctx context.Context, id int64) (Task, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id = ?`, id)
+	t, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("task %d: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("get task: %w", err)
+	}
+	return t, nil
+}
+
+// ListTasks returns every task, newest first.
+func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
+	return s.queryTasks(ctx, `SELECT `+taskColumns+` FROM tasks ORDER BY id DESC`)
+}
+
+// GetTaskBySlug loads one task by its slug.
+func (s *Store) GetTaskBySlug(ctx context.Context, slug string) (Task, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE slug = ?`, slug)
+	t, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("task %q: %w", slug, ErrNotFound)
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("get task by slug: %w", err)
+	}
+	return t, nil
+}
+
+// ClaimableTasks returns tasks a worker may advance: anything not in a
+// terminal or human-gated state, and not a queued task still waiting on a
+// dependency.
+//
+// The dependency gate applies only while a task is queued. Once it has a
+// worktree it is in flight, and a dependency that regresses afterwards must
+// not yank a running task back out of the pool mid-phase.
+func (s *Store) ClaimableTasks(ctx context.Context) ([]Task, error) {
+	return s.queryTasks(ctx, `SELECT `+taskColumns+`
+		FROM tasks
+		WHERE state NOT IN ('done', 'failed', 'escalated')
+		  AND (state <> 'queued' OR NOT EXISTS (
+		        SELECT 1 FROM task_deps d
+		        JOIN tasks p ON p.id = d.depends_on_id
+		        WHERE d.task_id = tasks.id AND p.state <> 'done'))
+		ORDER BY id ASC`)
+}
+
+func (s *Store) queryTasks(ctx context.Context, q string, args ...any) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SaveTask writes every mutable field of t and bumps updated_at.
+func (s *Store) SaveTask(ctx context.Context, t Task) error {
+	t.UpdatedAt = time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET state=?, phase=?, iteration=?, max_iterations=?,
+			blocking_severity=?, plan_session_id=?, exec_session_id=?,
+			branch=?, base_ref=?, git_common_dir=?, git_admin_dir=?,
+			worktree_dir=?, pr_url=?, err_msg=?, verify_command=?,
+			finding_hashes=?, cost_cap_usd=?, updated_at=?
+		WHERE id=?`,
+		t.State, t.Phase, t.Iteration, t.MaxIterations, t.BlockingSeverity,
+		t.PlanSessionID, t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir,
+		t.GitAdminDir, t.WorktreeDir, t.PRURL,
+		t.ErrMsg, t.VerifyCommand, strings.Join(t.FindingHashes, "\n"),
+		t.CostCapUSD, t.UpdatedAt.Format(rfc3339), t.ID)
+	if err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("task %d: %w", t.ID, ErrNotFound)
+	}
+	return nil
+}

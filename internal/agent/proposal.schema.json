@@ -1,0 +1,57 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tasks"],
+  "properties": {
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "goal", "constraints", "verify", "blocking_severity", "cost_cap", "depends_on", "rationale", "evidence"],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "A short kebab-case name unique within this response. Other tasks refer to it in depends_on."
+          },
+          "goal": {
+            "type": "string",
+            "description": "One self-contained change, phrased as an instruction. Not a theme or an area of the codebase."
+          },
+          "constraints": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Rules the implementation must follow, drawn from how this repository already works."
+          },
+          "verify": {
+            "type": ["string", "null"],
+            "description": "The command that proves this task is done, e.g. go test ./... — null if the repository has no usable one."
+          },
+          "blocking_severity": {
+            "type": "string",
+            "enum": ["any", "minor", "major", "critical"],
+            "description": "The lowest review severity that should hold this task's loop open."
+          },
+          "cost_cap": {
+            "type": ["number", "null"],
+            "description": "An advisory spend ceiling in USD for this task, or null for the daemon default."
+          },
+          "depends_on": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Keys of tasks that must finish first. Only tasks earlier in this array may be named."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Why this is worth doing, in one sentence, referring to what you actually read."
+          },
+          "evidence": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "file:line references backing the rationale."
+          }
+        }
+      }
+    }
+  }
+}

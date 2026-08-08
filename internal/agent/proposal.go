@@ -1,0 +1,168 @@
+package agent
+
+import (
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+)
+
+//go:embed proposal.schema.json
+var proposalSchemaFS embed.FS
+
+// ProposalSchema is the JSON Schema the analysis prompt embeds verbatim.
+//
+// Unlike the verdict schema this is never handed to a CLI flag: `claude -p`
+// has no --output-schema, only `codex exec` does. The schema is therefore
+// documentation for the model and nothing more, and the actual guarantee comes
+// from ParseProposal below. That difference is the reason this parser is as
+// strict as it is.
+var ProposalSchema = mustReadProposalSchema()
+
+func mustReadProposalSchema() []byte {
+	b, err := proposalSchemaFS.ReadFile("proposal.schema.json")
+	if err != nil {
+		panic("embedded proposal schema missing: " + err.Error())
+	}
+	return b
+}
+
+// ProposedTask is one task an analysis suggests.
+//
+// The scalar fields are pointers so a missing key is distinguishable from a
+// zero value. An absent "goal" decoding to "" would otherwise produce a task
+// with no instruction in it, which the loop would happily start spending money
+// on.
+type ProposedTask struct {
+	Key         *string  `json:"key"`
+	Goal        *string  `json:"goal"`
+	Constraints []string `json:"constraints"`
+	Verify      *string  `json:"verify"`
+	Severity    *string  `json:"blocking_severity"`
+	CostCap     *float64 `json:"cost_cap"`
+	DependsOn   []string `json:"depends_on"`
+	Rationale   *string  `json:"rationale"`
+	Evidence    []string `json:"evidence"`
+}
+
+// KeyOrEmpty and friends read a field that has passed validation.
+func (p ProposedTask) KeyOrEmpty() string    { return deref(p.Key) }
+func (p ProposedTask) GoalOrEmpty() string   { return deref(p.Goal) }
+func (p ProposedTask) VerifyOrEmpty() string { return deref(p.Verify) }
+
+// SeverityOrDefault returns the proposed threshold, falling back to the
+// loosest one rather than to the empty string, which is not a valid setting.
+func (p ProposedTask) SeverityOrDefault() string {
+	if p.Severity == nil || *p.Severity == "" {
+		return "any"
+	}
+	return *p.Severity
+}
+
+// CostCapOrZero returns the proposed cap, zero meaning "take the daemon's".
+func (p ProposedTask) CostCapOrZero() float64 {
+	if p.CostCap == nil {
+		return 0
+	}
+	return *p.CostCap
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+type proposalWire struct {
+	Tasks *[]ProposedTask `json:"tasks"`
+}
+
+// validSeverities duplicates config.ValidSeverities deliberately: this package
+// is the boundary between overseer and a CLI's output, and importing config
+// here would make the agent package depend on the daemon's settings to decode
+// a response.
+var validSeverities = map[string]bool{
+	"any": true, "minor": true, "major": true, "critical": true,
+}
+
+// ParseProposal decodes and validates an analysis response.
+//
+// Every deviation is an error rather than a lenient default. This is the same
+// posture as ParseVerdict, and for the same reason: what comes back drives
+// money being spent without a further human decision on each item, so a
+// half-understood response must stop the wizard rather than quietly produce a
+// shorter or subtly wrong task list.
+//
+// max bounds the number of tasks accepted. A model that ignores the budget and
+// returns ninety tasks is not obeying the brief, and truncating silently would
+// hide that.
+func ParseProposal(b []byte, max int) ([]ProposedTask, error) {
+	body := stripFence(strings.TrimSpace(string(b)))
+
+	var w proposalWire
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&w); err != nil {
+		return nil, fmt.Errorf("parse proposal: %w", err)
+	}
+	// Nothing may follow the object: a second concatenated response would
+	// otherwise be silently dropped and the first taken as the whole answer.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("parse proposal: unexpected data after the JSON object")
+	}
+
+	if w.Tasks == nil {
+		return nil, errors.New(`parse proposal: missing "tasks"`)
+	}
+	tasks := *w.Tasks
+	if len(tasks) == 0 {
+		return nil, errors.New("parse proposal: no tasks proposed")
+	}
+	if max > 0 && len(tasks) > max {
+		return nil, fmt.Errorf("parse proposal: %d tasks proposed, the brief allowed %d",
+			len(tasks), max)
+	}
+
+	seen := make(map[string]bool, len(tasks))
+	for i, t := range tasks {
+		if t.Key == nil || strings.TrimSpace(*t.Key) == "" {
+			return nil, fmt.Errorf("parse proposal: task %d has no key", i)
+		}
+		key := strings.TrimSpace(*t.Key)
+		// Duplicate keys would make depends_on ambiguous, and the wizard
+		// resolves dependencies by key.
+		if seen[key] {
+			return nil, fmt.Errorf("parse proposal: duplicate key %q", key)
+		}
+		if t.Goal == nil || strings.TrimSpace(*t.Goal) == "" {
+			return nil, fmt.Errorf("parse proposal: task %q has an empty goal", key)
+		}
+		if t.Severity != nil && !validSeverities[*t.Severity] {
+			return nil, fmt.Errorf("parse proposal: task %q has unknown blocking_severity %q",
+				key, *t.Severity)
+		}
+		if cap := t.CostCapOrZero(); cap < 0 {
+			return nil, fmt.Errorf("parse proposal: task %q has a negative cost_cap", key)
+		}
+		// Dependencies may only point backwards. That rejects both a forward
+		// reference and every cycle before any of this reaches the scheduler,
+		// where a cycle would be a set of tasks that can only wait for each
+		// other.
+		for _, dep := range t.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep == key {
+				return nil, fmt.Errorf("parse proposal: task %q depends on itself", key)
+			}
+			if !seen[dep] {
+				return nil, fmt.Errorf("parse proposal: task %q depends on %q, which is not an earlier task",
+					key, dep)
+			}
+		}
+		seen[key] = true
+	}
+	return tasks, nil
+}

@@ -1,0 +1,1154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if .Sel}}{{.Sel.Slug}} — overseer{{else}}overseer{{end}}</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+
+  <div class="nav">
+    <a class="nav-brand" href="/" style="color:inherit">OVERSEER</a>
+    <span class="label rule">{{.RunSummary}}</span>
+    {{if .SandboxNote}}<span class="label">{{.SandboxNote}}</span>{{end}}
+    {{with .RepoChip}}
+    {{/* A filter the operator cannot see is a board that looks empty for no
+         stated reason. */}}
+    <a class="repo-chip" href="{{.ClearURL}}" title="show every repository">
+      {{.Slug}} <span class="x">×</span>
+    </a>
+    {{end}}
+    <span class="spacer"></span>
+    <span class="live label" id="live">connecting…</span>
+    <div class="spend{{if .OverRunCap}} over{{end}}">
+      {{/* Two figures, never one. The claude and codex CLIs run on your
+           subscription, so what they report is what the usage would cost
+           through the API — a usage signal, not a bill. Only an endpoint you
+           configured yourself is money. */}}
+      <span class="label">reported</span>
+      <span class="amount">{{.Spend}}</span>
+      {{if .RunCap}}<span class="small">{{.RunCap}}</span>{{end}}
+    </div>
+    {{if .HasMetered}}
+    <div class="spend metered">
+      <span class="label">metered</span>
+      <span class="amount">{{.Metered}}</span>
+      <span class="small">your endpoint</span>
+    </div>
+    {{end}}
+    <a class="btn btn-secondary btn-mono" href="{{.Q.URL "overlay" "cli"}}">$ overseer status</a>
+    {{with .Running}}
+    {{/* The wizard lives in the URL, so closing that tab loses the only link
+         to a run still in progress. This is the way back. */}}
+    <a class="analysis-chip{{if .Live}} live{{end}}" href="{{.URL}}">
+      {{if .Live}}<span class="pip"></span>{{end}}{{.Label}}
+    </a>
+    {{end}}
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "repos"}}">Repos</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "backlog"}}">Backlog{{if .OpenBacklog}} <span class="count">{{.OpenBacklog}}</span>{{end}}</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "analyses"}}">Analyses</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardNew}}">Analyse a repo</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "settings"}}">Models</a>
+    <a class="btn btn-primary" href="{{.Q.URL "overlay" "add"}}">Queue task</a>
+  </div>
+
+  {{if .PauseReason}}
+  <div class="banner-auth">
+    <span class="title">Run paused — authentication failure</span>
+    <span class="body">{{.PauseReason}} No task will dispatch until this clears. Tasks stopped at their step boundary and kept their state.</span>
+    <span class="spacer"></span>
+    <form class="inline" method="post" action="/resume"><button class="btn" type="submit">Resume run</button></form>
+  </div>
+  {{end}}
+
+  {{with .Budget}}
+  <div class="banner-budget">
+    <span class="pip"></span>
+    <span>{{.Message}}</span>
+    <span class="spacer"></span>
+    <form class="inline" method="post" action="/task/{{.TaskID}}/cap">
+      <input type="hidden" name="cost_cap" value="{{.NewCap}}">
+      <button class="btn btn-ghost" type="submit">Raise cap to ${{.NewCap}}</button>
+    </form>
+    <a class="btn btn-ghost" href="{{.URL}}">Open task</a>
+  </div>
+  {{end}}
+
+  <div class="split">
+
+    <!-- ── task list ────────────────────────────────────────────────── -->
+    <div class="list">
+      <div class="list-head">
+        <form method="get" action="/">
+          {{/* The search box is the one control that needs a round trip of
+               its own, so it carries the rest of the view state along. */}}
+          <input type="hidden" name="sel" value="{{.Q.Sel}}">
+          <input type="hidden" name="filter" value="{{.Q.Filter}}">
+          <input type="hidden" name="tab" value="{{.Q.Tab}}">
+          {{if not .Q.Group}}<input type="hidden" name="group" value="0">{{end}}
+          <input class="input" type="search" name="q" value="{{.Q.Search}}"
+                 placeholder="Filter tasks, repos, branches…" aria-label="Filter tasks">
+        </form>
+        <div class="seg">
+          {{range .Filters}}
+          <a class="{{if .On}}on{{end}}" href="{{.URL}}">{{.Label}}<span class="count">{{.Count}}</span></a>
+          {{end}}
+        </div>
+        <div class="row">
+          <a class="small" href="{{.GroupURL}}" style="display:flex;align-items:center;gap:6px;color:inherit">
+            <span class="check{{if .Q.Group}} on{{end}}"></span>Group by repo
+          </a>
+          <span class="spacer"></span>
+          <span class="label">{{.ListCount}}</span>
+        </div>
+      </div>
+
+      {{if .BulkCount}}
+      <div class="bulkbar">
+        <span>{{.BulkCount}} selected</span>
+        <span class="spacer"></span>
+        <form class="inline" method="post" action="/tasks/bulk">
+          <input type="hidden" name="ids" value="{{.Q.BulkCSV}}">
+          <input type="hidden" name="action" value="continue">
+          <button class="btn btn-inverse" type="submit">Continue ×10</button>
+        </form>
+        <form class="inline" method="post" action="/tasks/bulk">
+          <input type="hidden" name="ids" value="{{.Q.BulkCSV}}">
+          <input type="hidden" name="action" value="abandon">
+          <button class="btn btn-inverse" type="submit">Abandon</button>
+        </form>
+        <a class="btn btn-inverse" style="border:0;opacity:.65" href="{{.Q.URL "clearbulk" true}}">Clear</a>
+      </div>
+      {{end}}
+
+      <div class="list-scroll">
+        {{if .Empty}}
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">No tasks{{if .Q.Search}} match that{{end}}</div>
+          <p class="muted" style="font-size:13px;max-width:34ch">Queue one above, or submit a batch:</p>
+          <code>overseer submit tasks.yaml</code>
+        </div>
+        {{end}}
+
+        {{range .Rows}}
+          {{if .Header}}
+          <div class="grouphead">
+            <span class="name">{{.Label}}</span>
+            <span class="small">{{.Sub}}</span>
+          </div>
+          {{else}}
+          {{/* The row is a wrapper rather than one big anchor: the bulk
+               checkbox is its own link, and an anchor inside an anchor is not
+               a thing the HTML parser will keep. */}}
+          <div class="taskrow tone-{{.Tone}}{{if .Selected}} selected{{end}}">
+            <span class="rail"></span>
+            <a class="body" href="{{.URL}}">
+              <span class="line">
+                <span class="dot"></span>
+                <span class="label state">{{.State}}</span>
+                <span class="small">{{.Progress}}</span>
+                <span class="spacer"></span>
+              </span>
+              <span class="goal">{{.Goal}}</span>
+              <span class="foot">
+                <span class="small repo">{{.Repo}}</span>
+                <span class="spacer"></span>
+                <span class="spark" title="blocking findings per review round">
+                  {{range .Bars}}<span class="bar{{if .Zero}} zero{{end}}{{if .Alert}} alert{{end}}"
+                        style="height:{{px .Height}}" title="{{.Title}}"></span>{{end}}
+                </span>
+                <span class="small">{{.Meta}}</span>
+              </span>
+              {{if .PR}}<span class="small">{{.PR}}</span>{{end}}
+              {{if .Note}}<span class="note">{{.Note}}</span>{{end}}
+            </a>
+            {{if .Bulkable}}
+            <a class="pick" href="{{.BulkURL}}" title="select for a bulk action"
+               aria-label="Select {{.Goal}} for a bulk action">
+              <span class="check{{if .Checked}} on{{end}}"></span>
+            </a>
+            {{end}}
+          </div>
+          {{end}}
+        {{end}}
+      </div>
+    </div>
+
+    <!-- ── detail ───────────────────────────────────────────────────── -->
+    <div class="detail">
+    {{if not .Sel}}
+      <div class="nothing">
+        <div class="inner">
+          <h4>Nothing selected</h4>
+          <p class="muted" style="font-size:14px">Every arrow in the plan → review → execute → review loop is automated. Your two jobs are writing the task list and reviewing the draft pull requests.</p>
+          <hr class="hr">
+          <div class="actions">
+            <a class="btn btn-primary" href="{{.Q.URL "overlay" "add"}}">Queue a task</a>
+            <a class="btn btn-secondary" href="{{.Q.URL "overlay" "cli"}}">See the CLI</a>
+          </div>
+        </div>
+      </div>
+    {{else}}
+      {{with .Sel}}
+      <div class="detail-head tone-{{.Tone}}">
+        <div class="meta">
+          <span class="label state">{{.State}}</span>
+          <span class="small">{{.Progress}}</span>
+          <span class="small">{{.Branch}}</span>
+          <span class="small">{{.Spend}}</span>
+          <span class="spacer"></span>
+          <div class="actions">
+            {{range .Actions}}
+              {{if .Href}}
+              <a class="btn btn-{{.Kind}}" href="{{.Href}}">{{.Label}}</a>
+              {{else}}
+              <form class="inline" method="post" action="{{.Post}}">
+                {{range .Fields}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">{{end}}
+                <button class="btn btn-{{.Kind}}" type="submit">{{.Label}}</button>
+              </form>
+              {{end}}
+            {{end}}
+          </div>
+        </div>
+        <h4>{{.Goal}}</h4>
+        <div class="chips">
+          {{range .Chips}}<span class="tag tag-{{.Kind}}">{{.Label}}</span>{{end}}
+        </div>
+      </div>
+
+      {{with .Banner}}
+      <div class="banner-task">
+        <div class="top">
+          <div style="flex:1">
+            <div class="title">{{.Title}}</div>
+            <div class="body">{{.Body}}</div>
+          </div>
+          <div class="actions" style="flex:none">
+            {{range .Actions}}
+            <form class="inline" method="post" action="{{.Post}}">
+              {{range .Fields}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">{{end}}
+              <button class="btn btn-{{.Kind}}" type="submit">{{.Label}}</button>
+            </form>
+            {{end}}
+          </div>
+        </div>
+        {{if .TakeOver}}<pre class="term">{{.TakeOver}}</pre>{{end}}
+      </div>
+      {{end}}
+
+      <div class="panes">
+
+        <!-- timeline -->
+        <div class="pane">
+          <div class="pane-head">
+            <span class="kicker">Timeline</span>
+            <span class="small">{{.StepCount}}</span>
+          </div>
+
+          {{if .FP}}
+          {{with .FP}}
+          <div class="converge">
+            <div class="fp" style="grid-template-columns:170px repeat({{len .Iters}},1fr)">
+              <span class="label" style="letter-spacing:.08em">fingerprint</span>
+              {{range .Iters}}<span class="head">{{.}}</span>{{end}}
+            </div>
+            {{range .Rows}}
+            <div class="fp" style="grid-template-columns:170px repeat({{len .Cells}},1fr)">
+              <span class="rowlabel" title="{{.Label}}">{{.Label}}</span>
+              {{range .Cells}}<span class="cell {{.}}"></span>{{end}}
+            </div>
+            {{end}}
+            <div class="caption" style="color:var(--color-accent-800)">{{.Note}}</div>
+          </div>
+          {{end}}
+          {{else if .Converge}}
+          <div class="converge">
+            <div class="chart">
+              {{range .Converge}}
+              <div class="col">
+                <div class="bar{{if .Zero}} zero{{end}}{{if .Alert}} alert{{end}}"
+                     style="height:{{px .Height}}" title="{{.Title}}"></div>
+                <span class="axis">{{.Label}}</span>
+              </div>
+              {{end}}
+            </div>
+            <div class="caption">{{.ConvergeNote}}</div>
+          </div>
+          {{end}}
+
+          <div class="pane-scroll">
+            <div class="lanes">
+              <span>claude</span>
+              <span class="accent">codex &amp; verify</span>
+            </div>
+            <div class="steps">
+              {{range .Steps}}
+              <div class="step {{if eq .Col 1}}claude{{else}}review{{end}}{{if .VerdictOK}} ok{{else if .Verdict}} bad{{end}}{{if .Live}} live{{end}}">
+                <div class="top">
+                  <span class="agent {{.Agent}}">{{.Agent}}</span>
+                  <span class="small">{{.Phase}}</span>
+                  <span class="spacer"></span>
+                  <span class="small">{{.Cost}}</span>
+                  <span class="small">{{.Duration}}</span>
+                </div>
+                <a class="summary" href="{{.ToggleURL}}">
+                  <span class="title">{{.Title}}</span>
+                  {{if .Verdict}}<span class="tag {{if .VerdictOK}}tag-neutral{{else}}tag-accent{{end}}">{{.Verdict}}</span>{{end}}
+                </a>
+                {{if .Open}}
+                <div class="detail">
+                  {{range .Findings}}
+                  <div class="finding {{.Severity}}{{if .Open}} open{{end}}">
+                    <span class="sev">{{.Severity}}</span>
+                    <div class="text">
+                      {{.Summary}}
+                      <div class="sub">
+                        {{if .Loc}}<span class="small">{{.Loc}}</span>{{end}}
+                        {{if .Open}}<span class="small" style="color:var(--color-accent-800)">still open</span>
+                        {{else}}<span class="small">resolved later</span>{{end}}
+                        {{if not .Blocking}}<span class="small">below the blocking threshold</span>{{end}}
+                      </div>
+                      {{if .Detail}}<pre class="term" style="max-height:180px">{{.Detail}}</pre>{{end}}
+                    </div>
+                  </div>
+                  {{end}}
+                  {{if .Err}}<div class="small" style="color:var(--color-accent-800)">{{.Err}}</div>{{end}}
+                  <div style="display:flex;gap:12px">
+                    {{if .TranscriptURL}}<a class="small" href="{{.TranscriptURL}}">full transcript</a>{{end}}
+                    <a class="small" href="{{$.Q.URL "sel" $.Sel.ID "tab" "diff"}}">diff for this task</a>
+                  </div>
+                </div>
+                {{end}}
+              </div>
+              {{end}}
+            </div>
+          </div>
+        </div>
+
+        <!-- right pane -->
+        <div class="pane">
+          {{with .Right}}
+          <div class="pane-head">
+            <span class="kicker">{{.Title}}</span>
+            <span class="small">{{.Sub}}</span>
+            <span class="spacer"></span>
+            <div class="seg seg-tight">
+              {{range .Tabs}}<a class="{{if .On}}on{{end}}" href="{{.URL}}">{{.Label}}</a>{{end}}
+            </div>
+          </div>
+
+          {{if eq .Tab "diff"}}
+            {{with .Diff}}
+              {{if .Err}}
+                <div class="pane-note">Could not read the diff: {{.Err}}</div>
+              {{else if .Empty}}
+                <div class="pane-note">{{.Empty}}</div>
+              {{else}}
+                <div class="filetabs">
+                  {{range .Files}}
+                  <a class="{{if .On}}on{{end}}" href="{{.URL}}">{{.Name}}<span class="stat">{{.Stat}}</span></a>
+                  {{end}}
+                </div>
+                <div class="pane-scroll diff">
+                  {{range .Lines}}
+                  <div class="diffline {{.Kind}}">
+                    <span class="n">{{.A}}</span>
+                    <span class="n b">{{.B}}</span>
+                    <span class="src">{{.Text}}</span>
+                  </div>
+                  {{with .Anchor}}
+                  <div class="anchor">
+                    <div class="head">
+                      <span class="sev">{{.Severity}}</span>
+                      <span class="small">{{.Round}}</span>
+                    </div>
+                    <div class="text">{{.Text}}</div>
+                  </div>
+                  {{end}}
+                  {{end}}
+                  {{if .Truncated}}
+                  <div class="pane-note">This file's diff was cut short — open the branch to read the rest.</div>
+                  {{end}}
+                </div>
+              {{end}}
+            {{end}}
+
+          {{else if eq .Tab "findings"}}
+            <div class="pane-scroll ledger">
+              {{if not .Ledger}}
+                <div class="muted" style="font-size:13px">No review has raised anything yet.</div>
+              {{else}}
+                <div class="intro">{{.Intro}}</div>
+                {{range .Ledger}}
+                <div class="item {{.Severity}}{{if .Open}} open{{end}}">
+                  <div>
+                    <div class="head">
+                      <span class="sev">{{.Severity}}</span>
+                      <span class="summary">{{.Summary}}</span>
+                    </div>
+                    {{if .Loc}}<div class="small" style="margin-top:3px">{{.Loc}}</div>{{end}}
+                  </div>
+                  <div class="track">
+                    <div class="cells">
+                      {{range .Track}}<span class="c {{.}}"></span>{{end}}
+                    </div>
+                    <span class="life">{{.Life}}</span>
+                  </div>
+                </div>
+                {{end}}
+              {{end}}
+            </div>
+
+          {{else}}
+            {{with .Live}}
+              {{if .Empty}}
+                <div class="pane-note">{{.Empty}}</div>
+              {{else}}
+              <div class="live">
+                <div class="bar">
+                  {{if .Live}}<span class="pip"></span>{{end}}
+                  <span>{{.Head}}</span>
+                  <span class="spacer"></span>
+                  <span class="meta">{{.Meta}}</span>
+                </div>
+                <pre id="stream">{{join "\n" .Lines}}</pre>
+              </div>
+              {{end}}
+            {{end}}
+          {{end}}
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    {{end}}
+    </div>
+  </div>
+</div>
+
+{{with .Toast}}
+<div class="toast">
+  <div class="stripe"></div>
+  <div class="body">
+    <div class="title">Task parked</div>
+    <div class="text">{{.Message}}</div>
+    <div class="row">
+      <a class="btn btn-primary" href="{{.OpenURL}}">Open task</a>
+      <a class="btn" style="color:var(--color-bg);opacity:.65" href="{{.CloseURL}}">Dismiss</a>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{with .Wizard}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Analyse a repository</h4>
+      <ol class="steps-rail">
+        <li class="{{if ge .Step 1}}done{{end}}{{if eq .Step 1}} on{{end}}">Source</li>
+        <li class="{{if ge .Step 2}}done{{end}}{{if eq .Step 2}} on{{end}}">Focus</li>
+        <li class="{{if ge .Step 3}}done{{end}}{{if eq .Step 3}} on{{end}}">Analysing</li>
+        <li class="{{if ge .Step 4}}done{{end}}{{if eq .Step 4}} on{{end}}">Review</li>
+      </ol>
+      <span class="spacer"></span>
+      {{if .Spend}}<span class="small">{{.Spend}}</span>{{end}}
+      <a class="btn btn-ghost" href="{{.CloseURL}}">close</a>
+    </div>
+
+    {{if .Err}}
+    <div class="wizard-error">
+      <span class="kicker">Analysis failed</span>
+      <div>{{.Err}}</div>
+    </div>
+    {{end}}
+
+    {{if eq .Step 1}}
+      {{if .Waiting}}
+      {{with .Waiting}}
+      <div class="body">
+        <div class="waiting"><span class="pip"></span><b>{{.Title}}</b></div>
+        <p class="muted" style="font-size:13px;margin:0">{{.Body}}</p>
+      </div>
+      {{end}}
+      {{else}}
+      <form method="post" action="/analyse">
+        <div class="body">
+          <div class="field">
+            <label for="wrepo">Repository already on this machine</label>
+            <input class="input" id="wrepo" name="repo" placeholder="/home/you/code/some-repo">
+          </div>
+          <div class="or">or</div>
+          <div class="field">
+            <label for="wurl">Clone a repository</label>
+            <input class="input" id="wurl" name="url" placeholder="https://github.com/acme/widget">
+            <p class="muted" style="font-size:11.5px;margin:6px 0 0">
+              https:// and ssh:// only. Other git transports can run commands the
+              URL names, so they are refused. The clone lands under the data
+              directory and the proposed tasks target it.
+            </p>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="small">The repository is read during the analysis and never written to.</span>
+          <span class="spacer"></span>
+          <a class="btn btn-secondary" href="{{.CloseURL}}">Cancel</a>
+          <button class="btn btn-primary" type="submit">Continue</button>
+        </div>
+      </form>
+      {{end}}
+
+    {{else if eq .Step 2}}
+      <form method="post" action="/analyse/{{.ID}}/focus">
+        <div class="body">
+          <div class="detected">
+            <span class="label">repository</span>
+            <span class="mono" style="font-size:13px">{{.RepoPath}}</span>
+            {{if .Detected}}<span class="small">{{.Detected}}</span>{{end}}
+          </div>
+          <div class="field">
+            <label>What should it look for?</label>
+            <div class="focus">
+              {{range .Focus}}
+              <label class="focus-opt">
+                <input type="checkbox" name="focus" value="{{.Label}}" {{if .On}}checked{{end}}>
+                <span class="check{{if .On}} on{{end}}"></span>
+                <span>
+                  <b>{{.Label}}</b>
+                  <span class="muted" style="font-size:11.5px;display:block">{{.Hint}}</span>
+                </span>
+              </label>
+              {{end}}
+            </div>
+          </div>
+          <div class="field">
+            <label for="wnotes">Anything else it should know</label>
+            <textarea class="input" id="wnotes" name="notes" style="min-height:58px"
+              placeholder="e.g. leave the vendored directory alone; we are mid-migration off the old client">{{.Notes}}</textarea>
+          </div>
+          <div class="pair">
+            <div class="field">
+              <label for="wmax">Most tasks to propose</label>
+              <input class="input" id="wmax" name="max_tasks" value="{{.MaxTasks}}" inputmode="numeric">
+            </div>
+            <div class="field">
+              <label for="wmodel">Model</label>
+              {{if .Models}}
+              <select class="input" id="wmodel" name="model">
+                {{range .Models}}
+                <option value="{{.Model}}" {{if .On}}selected{{end}}>{{.Provider}} / {{.Model}}</option>
+                {{end}}
+              </select>
+              {{else}}
+              <input class="input" id="wmodel" name="model" value="{{.Model}}" readonly>
+              {{end}}
+            </div>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="small">One agent turn. It costs money and takes a few minutes.</span>
+          <span class="spacer"></span>
+          {{/* formaction rather than a second form: a form inside a form is
+               dropped by the parser, and the discard button would silently
+               submit the focus form instead. */}}
+          <button class="btn btn-secondary" type="submit" formnovalidate
+                  formaction="/analyse/{{.ID}}/discard">Discard</button>
+          <button class="btn btn-primary" type="submit">Analyse</button>
+        </div>
+      </form>
+
+    {{else if eq .Step 3}}
+      {{with .Waiting}}
+      <div class="body" style="padding-bottom:0">
+        <div class="waiting"><span class="pip"></span><b>{{.Title}}</b></div>
+        <p class="muted" style="font-size:13px;margin:0">{{.Body}}</p>
+      </div>
+      {{end}}
+      {{with .Live}}
+      <div class="live wizard-live">
+        <div class="bar">
+          <span class="pip"></span>
+          <span>{{.Head}}</span>
+          <span class="spacer"></span>
+          <span class="meta">{{.Meta}}</span>
+        </div>
+        <pre id="stream">{{join "\n" .Lines}}</pre>
+      </div>
+      {{end}}
+      <div class="foot">
+        <span class="small">This page updates itself as the analysis runs.</span>
+        <span class="spacer"></span>
+        <form class="inline" method="post" action="/analyse/{{.ID}}/discard">
+          <button class="btn btn-secondary" type="submit">Cancel the analysis</button>
+        </form>
+      </div>
+
+    {{else}}
+      <div class="body">
+        {{if not .Rows}}
+          <p class="muted" style="font-size:13px;margin:0">The analysis produced nothing. Try again with different focus areas.</p>
+        {{else}}
+        <div class="small">{{len .Rows}} proposed · {{.Selected}} selected{{if .AlreadyQueued}} · {{.AlreadyQueued}} already queued{{end}} · {{.RepoPath}}</div>
+        {{$wid := .ID}}
+        {{range $row := .Rows}}
+        <div class="proposed{{if and (not $row.Selected) (not $row.Queued)}} off{{end}}{{if $row.Queued}} done{{end}}">
+          {{if $row.Queued}}
+          <span class="pickbtn" title="already queued as a task"><span class="check on"></span></span>
+          {{else}}
+          <form class="inline" method="post" action="/analyse/{{$wid}}/task/{{$row.ID}}">
+            <input type="hidden" name="action" value="toggle">
+            <button class="pickbtn" type="submit" title="include or drop this task">
+              <span class="check{{if $row.Selected}} on{{end}}"></span>
+            </button>
+          </form>
+          {{end}}
+          <div class="proposed-body">
+            <div class="goal">{{$row.Goal}}</div>
+            <div class="small">{{$row.Meta}}</div>
+            {{if $row.Rationale}}<div class="why">{{$row.Rationale}}</div>{{end}}
+            {{if $row.Evidence}}
+            <div class="small">{{join " · " $row.Evidence}}</div>
+            {{end}}
+            {{if $row.DependsOn}}
+            <div class="small">runs after {{join ", " $row.DependsOn}}</div>
+            {{end}}
+            {{if $row.Queued}}
+            <a class="small" href="{{$row.TaskURL}}">already queued — open the task</a>
+            {{else}}
+            <details class="edit">
+              <summary class="small">edit</summary>
+              <form method="post" action="/analyse/{{$wid}}/task/{{$row.ID}}">
+                <input type="hidden" name="action" value="save">
+                <div class="field"><label>Goal</label>
+                  <textarea class="input" name="goal" style="min-height:52px">{{$row.Goal}}</textarea></div>
+                <div class="pair">
+                  <div class="field"><label>Verify command</label>
+                    <input class="input" name="verify" value="{{$row.Verify}}"></div>
+                  <div class="field"><label>Blocking severity</label>
+                    <select class="input" name="severity">
+                      {{range $sev := $.Add.Severities}}
+                      <option value="{{$sev}}" {{if eq $sev $row.Severity}}selected{{end}}>{{$sev}}</option>
+                      {{end}}
+                    </select></div>
+                </div>
+                <div class="pair">
+                  <div class="field"><label>Cost cap (USD)</label>
+                    <input class="input" name="cost_cap" value="{{$row.Cap}}" inputmode="decimal"></div>
+                  <div class="field" style="display:flex;align-items:flex-end">
+                    <button class="btn btn-secondary" type="submit">Save this task</button></div>
+                </div>
+              </form>
+            </details>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
+        {{end}}
+
+        <form method="post" action="/analyse/{{.ID}}/regenerate" class="regen">
+          <div class="field">
+            <label for="wfeedback">Not what you wanted? Say why and run it again</label>
+            <input class="input" id="wfeedback" name="feedback"
+                   placeholder="too many docs tasks; go deeper on the store package">
+          </div>
+          <button class="btn btn-secondary" type="submit">Regenerate</button>
+        </form>
+      </div>
+      <div class="foot">
+        <span class="small">Queueing creates one branch and one draft pull request per task.</span>
+        <span class="spacer"></span>
+        <form class="inline" method="post" action="/analyse/{{.ID}}/discard">
+          <button class="btn btn-secondary" type="submit">Discard</button>
+        </form>
+        <form class="inline" method="post" action="/analyse/{{.ID}}/queue">
+          <button class="btn btn-primary" type="submit" {{if not .Selected}}disabled{{end}}>
+            Queue {{.Selected}} task{{if ne .Selected 1}}s{{end}}
+          </button>
+        </form>
+      </div>
+    {{end}}
+  </div>
+</div>
+{{end}}
+
+{{if .ShowingAll}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Analyses</h4>
+      <span class="small">{{len .Analyses}} kept</span>
+      <span class="spacer"></span>
+      <a class="btn btn-primary" href="{{.Q.URL "wizard" wizardNew "overlay" ""}}">Analyse a repo</a>
+      <a class="btn btn-ghost" href="{{.Q.URL "overlay" ""}}">close</a>
+    </div>
+    <div class="body">
+      {{if not .Analyses}}
+        <p class="muted" style="font-size:13px;margin:0">Nothing analysed yet. Point one at a repository and its
+          proposals stay here — a list you queued three of is a list you can come back to for the rest.</p>
+      {{else}}
+      <div class="small">An analysis keeps its proposals after you queue some. Reopen one to queue what is left,
+        or to see what it already produced.</div>
+      {{range .Analyses}}
+      <div class="analysisrow tone-{{.Tone}}">
+        <span class="rail"></span>
+        <div>
+          <div class="line">
+            <span class="dot"></span>
+            <span class="label state">{{.State}}</span>
+            <span class="small">{{.When}}</span>
+          </div>
+          <div class="mono" style="font-size:13px">{{.Repo}}</div>
+          {{if .Focus}}<div class="small">{{.Focus}}</div>{{end}}
+          {{if .Err}}<div class="small" style="color:var(--color-accent-800)">{{.Err}}</div>{{end}}
+        </div>
+        <div>
+          <div class="small">{{.Progress}}</div>
+          <div class="small">{{.Spend}}</div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:flex-end">
+          {{if .OpenURL}}
+            {{if .Remaining}}
+            <a class="btn btn-primary" href="{{.OpenURL}}">Queue {{.Remaining}} more</a>
+            {{else}}
+            <a class="btn btn-secondary" href="{{.OpenURL}}">Open</a>
+            {{end}}
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{end}}
+    </div>
+    <div class="foot">
+      <span class="small">Analyses are kept so a proposal outlives the sitting it was made in.</span>
+      <span class="spacer"></span>
+      <a class="btn btn-secondary" href="{{.Q.URL "overlay" ""}}">Close</a>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{with .Repos}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Repositories</h4>
+      <span class="small">{{len .Rows}} registered · {{.AgentTime}} agent time</span>
+      <span class="spacer"></span>
+      <a class="btn btn-ghost" href="{{.CloseURL}}">close</a>
+    </div>
+    <div class="body sheet-list">
+      <div class="ledger">
+        <div><span class="label">agent time</span><span class="amount">{{.AgentTime}}</span></div>
+        <div><span class="label">reported</span><span class="amount">{{.Reported}}</span></div>
+        <div><span class="label">metered</span><span class="amount metered">{{.Metered}}</span></div>
+      </div>
+      <p class="ledger-note">{{.Note}}</p>
+
+      {{if .Empty}}
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">No repositories yet</div>
+          <p class="muted" style="font-size:13px;max-width:44ch">One registers itself the first time you queue a task
+            or run an analysis against it, so this fills in on its own — or add one below.</p>
+        </div>
+      {{else}}
+      {{range .Rows}}
+      {{/* Same anatomy as a task row: a 3px tone rail, a body of stacked lines,
+           and the meta on a foot line. A repository reads the way a task does
+           because it is the same kind of thing to scan. */}}
+      <div class="listrow{{if .Archived}} off{{end}}{{if .Analysing}} tone-live{{else}} tone-muted{{end}}">
+        <span class="rail"></span>
+        <div class="body">
+          <span class="line">
+            <span class="dot"></span>
+            <span class="name">{{.Slug}}</span>
+            {{if .Archived}}<span class="label">archived</span>{{end}}
+            {{if .Analysing}}<span class="label state">analysing</span>{{end}}
+            <span class="spacer"></span>
+            <span class="small">{{.Counts}}</span>
+          </span>
+          <span class="small mono path">{{.Path}}</span>
+          {{if .Detected}}<span class="small">{{.Detected}}</span>{{end}}
+          <span class="metaline">
+            <span class="small">{{.AgentTime}} · {{.Turns}}</span>
+            <span class="spacer"></span>
+            <span class="small">{{.Reported}} reported{{if ne .Metered "$0.00"}} · <span class="accent">{{.Metered}} metered</span>{{end}}</span>
+          </span>
+          {{if .Defaults}}<span class="small mono">inherited: {{.Defaults}}</span>{{end}}
+
+          {{/* Behind a disclosure, the way a proposal's edit form is: five
+               repositories otherwise means five identical forms stacked down
+               the page, which buries the numbers they belong to. */}}
+          <details class="edit">
+            <summary class="small">Defaults new tasks inherit</summary>
+            <form method="post" action="/repos">
+              <input type="hidden" name="path" value="{{.Path}}">
+              <div class="pair">
+                <div class="field">
+                  <label for="rv-{{.ID}}">Verify command</label>
+                  <input class="input" id="rv-{{.ID}}" name="verify" value="{{.Verify}}" placeholder="inherits the daemon default">
+                </div>
+                <div class="field">
+                  <label for="rc-{{.ID}}">Task cap (USD)</label>
+                  <input class="input" id="rc-{{.ID}}" name="cost_cap" value="{{.Cap}}" inputmode="decimal" placeholder="inherit">
+                </div>
+              </div>
+              <div class="pair">
+                <div class="field">
+                  <label for="rs-{{.ID}}">Blocks on</label>
+                  {{$sev := .Severity}}
+                  <select class="input" id="rs-{{.ID}}" name="blocking_severity">
+                    <option value="" {{if eq $sev ""}}selected{{end}}>inherit the daemon default</option>
+                    <option value="any" {{if eq $sev "any"}}selected{{end}}>any</option>
+                    <option value="minor" {{if eq $sev "minor"}}selected{{end}}>minor</option>
+                    <option value="major" {{if eq $sev "major"}}selected{{end}}>major</option>
+                    <option value="critical" {{if eq $sev "critical"}}selected{{end}}>critical</option>
+                  </select>
+                </div>
+                <div class="field" style="align-self:end">
+                  <button class="btn btn-secondary" type="submit">Save defaults</button>
+                </div>
+              </div>
+            </form>
+          </details>
+        </div>
+        <div class="rowactions">
+          <a class="btn btn-secondary" href="{{.BoardURL}}">Tasks</a>
+          <a class="btn {{if .Backlog}}btn-primary{{else}}btn-ghost{{end}}" href="{{.BacklogURL}}">
+            Backlog{{if .Backlog}} {{.Backlog}}{{end}}
+          </a>
+          <form class="inline" method="post" action="/repos/{{.ID}}/archive">
+            <input type="hidden" name="archived" value="{{if .Archived}}0{{else}}1{{end}}">
+            <button class="btn btn-ghost" type="submit">{{if .Archived}}Restore{{else}}Archive{{end}}</button>
+          </form>
+        </div>
+      </div>
+      {{end}}
+      {{end}}
+
+      <form class="addbar" method="post" action="/repos">
+        <div class="field" style="flex:1">
+          <label for="repo-path">Add a repository</label>
+          <input class="input" id="repo-path" name="path" required
+                 placeholder="/home/you/code/some-repo">
+        </div>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+    </div>
+    <div class="metaline">
+      <span class="small">Every task and analysis attributes to a repository, so its history adds up.</span>
+      <span class="spacer"></span>
+      <a class="btn btn-secondary" href="{{.CloseURL}}">Close</a>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{with .Backlog}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Backlog</h4>
+      <span class="small">{{if .RepoSlug}}{{.RepoSlug}} · {{.Open}} open of {{.Total}}{{else}}no repositories yet{{end}}</span>
+      <span class="spacer"></span>
+      {{if .BoardURL}}<a class="btn btn-secondary" href="{{.BoardURL}}">Its tasks</a>{{end}}
+      <a class="btn btn-ghost" href="{{.CloseURL}}">close</a>
+    </div>
+    <div class="body sheet-list">
+      {{if .Repos}}
+      <div class="repo-tabs">
+        {{range .Repos}}
+        <a class="chip{{if .On}} on{{end}}" href="{{.URL}}">{{.Slug}}{{if .Count}} <span class="count">{{.Count}}</span>{{end}}</a>
+        {{end}}
+      </div>
+      {{end}}
+
+      {{if not .RepoID}}
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">No repositories yet</div>
+          <p class="muted" style="font-size:13px;max-width:44ch">Queue a task or run an analysis and one registers
+            itself; its backlog starts filling from what reviews find.</p>
+        </div>
+      {{else}}
+
+      {{if .Empty}}
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">Nothing waiting</div>
+          <p class="muted" style="font-size:13px;max-width:44ch">Review findings below a task's blocking threshold
+            land here, along with anything an analysis proposed that you did not queue.</p>
+        </div>
+      {{end}}
+
+      {{range .Groups}}
+      {{/* The same sticky group header the board uses, so a grouped list reads
+           the same wherever it appears. */}}
+      <div class="grouphead stacked">
+        <span class="name">{{.Label}}</span>
+        <span class="small">{{len .Rows}}</span>
+        <span class="blurb small">{{.Blurb}}</span>
+      </div>
+      {{range .Rows}}
+      <div class="listrow tone-{{.Tone}}{{if ne .State "open"}} off{{end}}">
+        <span class="rail"></span>
+        <div class="body">
+          <span class="line">
+            <span class="dot"></span>
+            {{if .Severity}}<span class="label state">{{.Severity}}</span>{{end}}
+            {{if .Seen}}<span class="label repeat">{{.Seen}}</span>{{end}}
+            {{if eq .State "dismissed"}}<span class="label">dismissed</span>{{end}}
+            {{if eq .State "queued"}}<span class="label">task #{{.TaskID}}</span>{{end}}
+            <span class="spacer"></span>
+            <span class="small">{{.When}}</span>
+          </span>
+          <span class="goal">{{.Title}}</span>
+          {{if .Detail}}<span class="small">{{.Detail}}</span>{{end}}
+          <span class="metaline">
+            {{if .Origin}}<span class="small">{{.Origin}}</span>{{end}}
+            <span class="spacer"></span>
+            {{if .Evidence}}<span class="small mono path">{{join ", " .Evidence}}</span>{{end}}
+          </span>
+        </div>
+        <div class="rowactions">
+          {{if .Actions}}
+            <form class="inline" method="post" action="/backlog/{{.ID}}/queue">
+              <button class="btn btn-primary" type="submit">Queue it</button>
+            </form>
+            <form class="inline" method="post" action="/backlog/{{.ID}}/dismiss">
+              <input type="hidden" name="reopen" value="{{if eq .State "dismissed"}}1{{else}}0{{end}}">
+              <button class="btn btn-ghost" type="submit">{{if eq .State "dismissed"}}Reopen{{else}}Dismiss{{end}}</button>
+            </form>
+          {{else}}
+            <a class="btn btn-secondary" href="/task/{{.TaskID}}">Open task</a>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{end}}
+
+      <form class="addbar" method="post" action="/backlog">
+        <input type="hidden" name="repo_id" value="{{.RepoID}}">
+        <div class="field" style="flex:1">
+          <label for="bl-title">Write something down</label>
+          <input class="input" id="bl-title" name="title" required placeholder="What is worth doing here?">
+        </div>
+        <div class="field">
+          <label for="bl-sev">Severity</label>
+          <select class="input" id="bl-sev" name="severity">
+            {{range .Severities}}<option value="{{.}}">{{if .}}{{.}}{{else}}none{{end}}</option>{{end}}
+          </select>
+        </div>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+      {{end}}
+    </div>
+    <div class="metaline">
+      <span class="small">Queueing an item creates a task carrying its evidence and the repository's defaults.</span>
+      <span class="spacer"></span>
+      <a class="btn btn-secondary" href="{{.CloseURL}}">Close</a>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{with .Settings}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Models and providers</h4>
+      <span class="small">{{if .Editable}}{{.Path}}{{else}}no config file to write to{{end}}</span>
+      <span class="spacer"></span>
+      <a class="btn btn-ghost" href="{{$.Q.URL "overlay" ""}}">close</a>
+    </div>
+
+    {{if .Saved}}
+    <div class="wizard-error" style="background:var(--color-surface);border-bottom-color:var(--color-divider)">
+      <span class="kicker" style="color:var(--color-text)">Saved</span>
+      <div>Written to the config file. Steps already running keep the role they started with.</div>
+    </div>
+    {{end}}
+
+    <form method="post" action="/settings">
+      <div class="body">
+        <div class="small">Each job in the loop picks a CLI, an endpoint and a model. A role can use either
+          CLI — the constraint is protocol: <span class="mono">claude</span> talks to an Anthropic-shaped
+          endpoint, <span class="mono">codex</span> to an OpenAI-shaped one, so only matching providers are offered.</div>
+
+        {{range .Roles}}
+        <div class="rolerow">
+          <div>
+            <div class="kicker">{{.Name}}</div>
+            <div class="small">{{.Description}}</div>
+            {{if .Warning}}<div class="small" style="color:var(--color-accent-800)">{{.Warning}}</div>{{end}}
+          </div>
+          <div class="field">
+            <label for="agent-{{.Name}}">Runs through</label>
+            <select class="input" id="agent-{{.Name}}" name="agent-{{.Name}}" {{if not $.Settings.Editable}}disabled{{end}}>
+              {{$cur := .Agent}}
+              {{range .Agents}}
+              <option value="{{.Label}}" {{if .On}}selected{{end}}>{{.Label}}</option>
+              {{end}}
+            </select>
+            <p class="muted" style="font-size:11px;margin:4px 0 0">changing this reloads the model list on save</p>
+          </div>
+          <div class="field">
+            <label for="model-{{.Name}}">Provider and model</label>
+            <select class="input" id="model-{{.Name}}" name="model-{{.Name}}" {{if not $.Settings.Editable}}disabled{{end}}>
+              {{range .Choices}}
+              <option value="{{.Value}}" {{if .On}}selected{{end}}>{{.Provider}} / {{.Model}}</option>
+              {{end}}
+            </select>
+          </div>
+        </div>
+        {{end}}
+
+        <div class="hr"></div>
+        <div class="kicker">Providers</div>
+        <div class="small">Endpoints are configured in the file, not here: pointing the daemon at a new host is
+          a deliberate edit, not a dropdown. Keys are never stored — each provider names the environment
+          variable that holds one.</div>
+        {{range .Providers}}
+        <div class="providerrow{{if not .KeyPresent}} missing{{end}}">
+          <div>
+            <div class="mono" style="font-size:13px">{{.Name}}</div>
+            <div class="small">{{.Kind}} · {{.Endpoint}}</div>
+          </div>
+          <div>
+            <div class="small">{{if .KeyEnv}}{{.KeyEnv}}{{else}}the CLI's own login{{end}}</div>
+            <div class="small">{{if .KeyPresent}}key present{{else}}<span style="color:var(--color-accent)">not set in the daemon's environment</span>{{end}}</div>
+          </div>
+          <div>
+            <div class="small">{{if .Models}}{{join ", " .Models}}{{else}}the CLI's default model{{end}}</div>
+            {{if .UsedBy}}<div class="small">used by {{join ", " .UsedBy}}</div>{{end}}
+          </div>
+        </div>
+        {{end}}
+      </div>
+      <div class="foot">
+        <span class="small">A change applies to the next agent turn; steps already running keep their role.</span>
+        <span class="spacer"></span>
+        <a class="btn btn-secondary" href="{{$.Q.URL "overlay" ""}}">Close</a>
+        <button class="btn btn-primary" type="submit" {{if not .Editable}}disabled{{end}}>Save</button>
+      </div>
+    </form>
+  </div>
+</div>
+{{end}}
+
+{{if eq .Q.Overlay "cli"}}
+<div class="backdrop centre">
+  <div class="console">
+    <div class="head">
+      <span class="label" style="color:#e8e5e3">overseer status</span>
+      <span class="spacer"></span>
+      <a class="btn btn-inverse" href="{{.Q.URL "overlay" ""}}">close</a>
+    </div>
+    <pre>{{.CLIText}}</pre>
+  </div>
+</div>
+{{end}}
+
+{{if eq .Q.Overlay "add"}}
+<div class="backdrop top">
+  <form class="sheet" method="post" action="/tasks">
+    <div class="head">
+      <h4 style="margin:0">Queue a task</h4>
+      <span class="small">equivalent to one entry in tasks.yaml</span>
+      <span class="spacer"></span>
+      <a class="btn btn-ghost" href="{{.Q.URL "overlay" ""}}">close</a>
+    </div>
+    {{with .Add}}
+    <div class="body">
+      <div class="field">
+        <label for="goal">Goal</label>
+        <textarea class="input" id="goal" name="goal" required style="min-height:76px"
+                  placeholder="What should be done?"></textarea>
+      </div>
+      <div class="pair">
+        <div class="field">
+          <label for="repo">Repository</label>
+          {{/* Registered repositories by name, and a path not listed yet is
+               still accepted: registration is a side effect of use, not a gate
+               in front of it. */}}
+          <input class="input" id="repo" name="repo" required list="repos"
+                 value="{{range .Repos}}{{if .On}}{{.Slug}}{{end}}{{end}}"
+                 placeholder="a repo name, or /home/you/code/some-repo">
+          <datalist id="repos">
+            {{range .Repos}}<option value="{{.Slug}}" label="{{.Path}}">{{end}}
+          </datalist>
+          <p class="muted" style="font-size:11px;margin:4px 0 0">a registered name, or any path — a new one registers itself</p>
+        </div>
+        <div class="field">
+          <label for="verify">Verify command — runs before every review</label>
+          <input class="input" id="verify" name="verify" value="{{.Verify}}" placeholder="go test ./...">
+        </div>
+      </div>
+      <div class="field">
+        <label for="constraints">Constraints — one per line</label>
+        <textarea class="input" id="constraints" name="constraints" style="min-height:58px"></textarea>
+      </div>
+      <div class="pair">
+        <div class="field">
+          <label for="sev">Blocking severity</label>
+          <select class="input" id="sev" name="blocking_severity">
+            {{range .Severities}}
+            <option value="{{.}}" {{if eq . $.Add.Severity}}selected{{end}}>{{.}}</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="field">
+          <label for="cap">Task cap (USD) — advisory, raises a banner and nothing else</label>
+          <input class="input" id="cap" name="cost_cap" value="{{.Cap}}" inputmode="decimal">
+        </div>
+      </div>
+      {{if .Deps}}
+      <div class="field">
+        <label>Runs after — the task waits for these to reach done</label>
+        <div class="picker">
+          {{range .Deps}}
+          <label><input type="checkbox" name="depends_on" value="{{.ID}}">{{.Slug}} <span class="muted">{{.State}}</span></label>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      <div class="field">
+        <label>Start from a template</label>
+        <div class="picker">
+          {{range .Templates}}
+          <label><button class="btn btn-ghost" type="button"
+                  data-goal="{{.Goal}}" onclick="document.getElementById('goal').value=this.dataset.goal">{{.Label}}</button></label>
+          {{end}}
+        </div>
+      </div>
+    </div>
+    {{end}}
+    <div class="foot">
+      <span class="small">Queued tasks start as soon as a worker is free.</span>
+      <span class="spacer"></span>
+      <a class="btn btn-secondary" href="{{.Q.URL "overlay" ""}}">Cancel</a>
+      <button class="btn btn-primary" type="submit">Queue task</button>
+    </div>
+  </form>
+</div>
+{{end}}
+
+<script>
+  // The daemon reports every state change; the page is cheap to render server
+  // side, so a reload is simpler and less to get wrong than patching the DOM.
+  // The current URL carries the whole view, so the reload keeps the selection,
+  // the filter and the open step.
+  const es = new EventSource("/events");
+  const live = document.getElementById("live");
+  es.onopen = () => { live.textContent = "live"; };
+  es.onerror = () => { live.textContent = "reconnecting…"; };
+  es.addEventListener("change", () => { location.reload(); });
+
+  // Keep the live pane pinned to the newest output across those reloads.
+  const stream = document.getElementById("stream");
+  if (stream) { stream.scrollTop = stream.scrollHeight; }
+</script>
+</body>
+</html>

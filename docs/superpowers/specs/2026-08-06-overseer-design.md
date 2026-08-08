@@ -459,8 +459,20 @@ Both agents run inside a [bubblewrap](https://github.com/containers/bubblewrap) 
 | Agent binary directories | ro | Both CLIs install as symlinks into versioned directories under `$HOME`. |
 | `<runs>/<slug>` | rw | Codex writes `--output-last-message` itself. |
 | Verdict schema file | ro | Codex reads `--output-schema` itself. |
-| Toolchain caches (`GOCACHE`, `GOMODCACHE`, …) | rw | Derived data. Without them a `$HOME` tmpfs forces a cold build and a full dependency re-download every turn. |
+| Overseer's own Go build/module cache, under `<data_dir>/gocache` | rw | `GOCACHE`/`GOMODCACHE` point here, never at the operator's real `~/.cache/go-build` or `~/go/pkg/mod`. Go's build cache holds trusted, reused-verbatim output blobs (full verification is opt-in behind `GODEBUG=gocacheverify=1`), so a write smuggled through the operator's real one would be a persistence channel out of the sandbox: it could get linked into a later *unsandboxed* build without ever being rebuilt from source. Shared across the whole run, not per task, so the cache stays warm across iterations. |
+| Other toolchain caches (`~/.cargo/registry`, `~/.npm`, `~/.cache/pip`) | rw | Derived data, from the operator's real directories. Without them a `$HOME` tmpfs forces a cold build and a full dependency re-download every turn. Unlike Go's, these are integrity-checked on read, which is what makes mounting the real ones an acceptable risk that mounting `~/.cache/go-build` was not. |
 | `/usr`, `/etc`, `/run/systemd/resolve` | ro | The system, and DNS. |
+
+The environment gets the same treatment as the filesystem: bubblewrap is invoked with
+`--clearenv`, then `--setenv` for exactly `HOME`, `PATH`, `TERM`, `LANG`/`LC_*`, the agents'
+own credential variables (`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_API_KEY`), the two
+`GOCACHE`/`GOMODCACHE` overrides above, and whatever the operator names in
+`sandbox_env_passthrough`. Before this, `--clearenv` was never emitted, so bubblewrap passed
+its own inherited environment straight through — `GITHUB_TOKEN`, `AWS_*`, and anything else
+the daemon process happened to have were reachable from inside a sandbox whose filesystem
+view excluded them entirely. The design intent was always that a sandboxed agent gets no
+credentials beyond its own; that held for the filesystem and did not hold for the process
+environment until this was added.
 
 **Why the state directory is inverted.** The obvious arrangement — mount the real
 `~/.claude` writable and pin `settings.json` read-only on top of it — does not hold. An
@@ -480,7 +492,9 @@ persist for the task's own lifetime, which is all `--resume` needs — verified 
 Credentials beyond the agents' own are deliberately **not** mounted: no `~/.netrc`,
 `~/.ssh`, or `~/.gitconfig`. A private dependency proxy therefore will not authenticate
 until an operator opts in via `sandbox_extra_read_only`, which is the right default — the
-alternative is handing credentials to an unattended agent.
+alternative is handing credentials to an unattended agent. The same now holds for the
+process environment: a variable such as a proxy token or a cloud provider's credentials is
+absent unless the operator names it in `sandbox_env_passthrough`.
 
 Everything else is absent: other repositories, dotfiles, `~/.ssh`, and overseer's own
 database. The data directory is never mounted whole, only the current task's run
