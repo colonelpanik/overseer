@@ -362,6 +362,16 @@ quietly stayed put.
   `AWS_*`, and anything else your shell happens to export do not reach the
   agent. `sandbox_env_passthrough` lets an operator add more when a task
   genuinely needs it.
+- **The agents' own sandbox is turned off inside overseer's.** Each agent CLI
+  confines its own shell tool, and a sandbox inside a sandbox is refused on a
+  kernel that gates unprivileged user namespaces behind an AppArmor profile —
+  Ubuntu 24.04 and later, where `kernel.apparmor_restrict_unprivileged_userns`
+  is `1`. Overseer's own sandbox works there; the agent's then fails on every
+  run with `bwrap: No permissions to create a new namespace`, which reads in a
+  transcript exactly like overseer's being broken. So a confined agent is told
+  it is already confined (`CLAUDE_CODE_SANDBOXED`) and does not try. It is not
+  told that with `sandbox: off`, where its own is the only one there is. The
+  board says which applies.
 - Network is **not** restricted — the agents call an HTTPS API. The sandbox
   limits what an agent can read and write, not what it can send. Do not point
   overseer at a repository whose contents you would not want an agent to

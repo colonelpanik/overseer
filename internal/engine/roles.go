@@ -111,6 +111,33 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 	return r, nil
 }
 
+// agentEnv is the environment one agent invocation gets: the role's provider
+// settings, plus a statement that it is already confined.
+//
+// The agent CLIs sandbox their own shell tool, and a sandbox inside a sandbox
+// is refused on a kernel that only permits unprivileged user namespaces
+// through an AppArmor profile — Ubuntu 24.04 and later. Overseer's own sandbox
+// works; the agent's then fails on every run with "bwrap: No permissions to
+// create a new namespace", which in a transcript reads exactly like overseer's
+// sandbox being broken. Telling the agent it is already confined stops it
+// trying.
+//
+// Only when overseer is actually confining it. With the sandbox off, the
+// agent's own is the only one there is, and claiming otherwise would turn a
+// deliberate "no sandbox" into a silently unprotected agent that believes it
+// is protected.
+func (e *Engine) agentEnv(role resolved) map[string]string {
+	if e.Sandbox == nil || e.Sandbox.Name() == "off" {
+		return role.Env
+	}
+	env := make(map[string]string, len(role.Env)+1)
+	for k, v := range role.Env {
+		env[k] = v
+	}
+	env["CLAUDE_CODE_SANDBOXED"] = "1"
+	return env
+}
+
 // args builds the argv for one turn of this role.
 //
 // The two CLIs take different flags for the same job, so the role's agent —

@@ -216,3 +216,45 @@ func TestBinMountsOnMissingBinaryReturnsNothing(t *testing.T) {
 		t.Errorf("BinMounts = %v, want empty for a missing binary", got)
 	}
 }
+
+// The failure this exists to name: the outer sandbox works, the agent's own
+// one inside it does not, and the agent's error reads like ours breaking.
+func TestProbeNestedReportsWhatItActuallyTested(t *testing.T) {
+	if err := Probe("bwrap"); err != nil {
+		t.Skip("bwrap unusable here; the nested probe has nothing to say")
+	}
+	err := ProbeNested("bwrap")
+	if err == nil {
+		return // nesting permitted on this machine, which is also a valid answer
+	}
+	// When it does fail, it must say it was the *inner* one, or the note is
+	// indistinguishable from Probe's and sends the operator after the wrong
+	// thing entirely.
+	if !strings.Contains(err.Error(), "inside this one") {
+		t.Errorf("ProbeNested error = %q, want it to name the nested sandbox", err)
+	}
+}
+
+func TestProbeNestedOnAMissingBinary(t *testing.T) {
+	if err := ProbeNested("definitely-not-a-real-bwrap"); err == nil {
+		t.Fatal("want an error for a binary that is not there")
+	}
+}
+
+// Whatever this kernel allows, Select must still hand back a usable wrapper —
+// nesting is the agent's problem, not a reason to refuse to run.
+func TestSelectStillWorksWhateverNestingAllows(t *testing.T) {
+	if err := Probe("bwrap"); err != nil {
+		t.Skip("bwrap unusable here")
+	}
+	w, note, err := Select("auto", "bwrap")
+	if err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if w.Name() != "bwrap" {
+		t.Errorf("Name = %q, want bwrap", w.Name())
+	}
+	if ProbeNested("bwrap") != nil && !strings.Contains(note, "nested") {
+		t.Errorf("note = %q, want it to mention that nested sandboxes are refused", note)
+	}
+}

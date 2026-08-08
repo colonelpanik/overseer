@@ -117,6 +117,36 @@ func Probe(bin string) error {
 	return nil
 }
 
+// ProbeNested reports whether a sandbox can itself create a sandbox.
+//
+// The agent CLIs confine their own shell tool, and on a kernel that permits
+// unprivileged user namespaces only through an AppArmor profile — Ubuntu 24.04
+// and later, where kernel.apparmor_restrict_unprivileged_userns is 1 — the
+// outer bwrap succeeds and the inner one is refused. Overseer's own sandbox is
+// fine; the agent's fails on every single run with
+//
+//	bwrap: No permissions to create a new namespace
+//
+// which reads, in a transcript, exactly like overseer's sandbox being broken.
+//
+// Probe cannot catch this, and is not wrong to miss it: it tests the outer
+// case, which genuinely works. This tests the case the agent is about to hit,
+// so the answer can be stated up front rather than inferred from noise.
+func ProbeNested(bin string) error {
+	resolved, err := exec.LookPath(bin)
+	if err != nil {
+		return fmt.Errorf("sandbox: %w", err)
+	}
+	inner := fmt.Sprintf("%s --unshare-user --ro-bind / / --proc /proc --dev /dev /bin/true", resolved)
+	cmd := exec.Command(resolved, "--unshare-all", "--ro-bind", "/", "/",
+		"--proc", "/proc", "--dev", "/dev", "/bin/sh", "-c", inner)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("a sandbox inside this one cannot create a namespace: %w: %s",
+			err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // Select resolves a configured mode into a Wrapper, returning a one-line
 // note describing what is active.
 //
@@ -132,16 +162,27 @@ func Select(mode, bwrapBin string) (Wrapper, string, error) {
 		if err := Probe(bwrapBin); err != nil {
 			return nil, "", err
 		}
-		return Bwrap{Bin: bwrapBin}, "sandbox: bwrap", nil
+		return Bwrap{Bin: bwrapBin}, "sandbox: bwrap" + nestedNote(bwrapBin), nil
 
 	case "auto", "":
 		if err := Probe(bwrapBin); err != nil {
 			return Passthrough{}, fmt.Sprintf(
 				"sandbox unavailable (%v): agents run UNSANDBOXED with this user's full filesystem access", err), nil
 		}
-		return Bwrap{Bin: bwrapBin}, "sandbox: bwrap (auto)", nil
+		return Bwrap{Bin: bwrapBin}, "sandbox: bwrap (auto)" + nestedNote(bwrapBin), nil
 	}
 	return nil, "", fmt.Errorf("sandbox: unknown mode %q, want auto, bwrap or off", mode)
+}
+
+// nestedNote describes what happens to the agent's own sandbox, when that is
+// worth saying. It is a suffix on the mode note rather than an error: the
+// agent runs perfectly well without a sandbox of its own, because it already
+// has ours.
+func nestedNote(bin string) string {
+	if ProbeNested(bin) == nil {
+		return ""
+	}
+	return " (nested sandboxes refused by this kernel; the agents' own is off and overseer's is doing the confining)"
 }
 
 // BinMounts returns the read-only mounts needed to make bin executable inside
