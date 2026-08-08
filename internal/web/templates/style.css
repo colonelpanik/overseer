@@ -647,3 +647,125 @@ pre.term {
 @media (max-width: 700px) {
   .analysisrow { grid-template-columns: 3px minmax(0, 1fr); }
 }
+
+/* ── repositories and the backlog ─────────────────────────────────────── */
+
+/* The repo filter, on the nav so a narrowed board always says so. */
+.repo-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border: 1px solid var(--color-accent);
+  font: 400 11px/1.2 var(--font-mono); color: var(--color-text); text-decoration: none;
+}
+.repo-chip:hover { color: var(--color-text); text-decoration: none; background: var(--color-accent-100); }
+.repo-chip .x { color: var(--mute); }
+
+/* Metered usage sits beside reported and never merges with it. */
+.spend.metered .amount { color: var(--color-accent-700); }
+
+/* A badge for "how many are waiting", on the nav button and the repo tabs.
+   The filter segment has its own .count treatment and keeps it. */
+.btn .count, .repo-tabs .count {
+  display: inline-block; min-width: 16px; padding: 0 4px; margin-left: 5px;
+  background: var(--color-accent); color: var(--color-neutral-100);
+  font: 700 10px/16px var(--font-mono); text-align: center;
+}
+
+/* A sheet whose body is a list rather than a form: the rows run edge to edge
+   the way the board's do, so the padding lives on the rows. */
+.sheet-list { padding: 0; gap: 0; }
+.sheet-list > .empty { padding: 30px 18px; }
+
+/* One row shape for repositories and backlog items, matching .taskrow: a 3px
+   tone rail, a stack of lines, and the meta on a foot line. Two lists that are
+   both "things to scan and pick from" should not read differently. */
+.listrow {
+  display: grid; grid-template-columns: 3px minmax(0, 1fr) auto;
+  border-bottom: 1px solid var(--color-divider);
+}
+.listrow:hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+.listrow .rail { background: var(--color-neutral-400); }
+.listrow.tone-live  .rail { background: var(--color-text); }
+.listrow.tone-alert .rail { background: var(--color-accent); }
+.listrow.tone-muted .rail { background: var(--color-neutral-400); }
+/* Dismissed, queued and archived rows stay visible: the record of what was
+   decided is the point of keeping them. */
+.listrow.off { opacity: .55; }
+.listrow .body { padding: 11px 14px 12px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.listrow .line { display: flex; align-items: center; gap: 8px; }
+.listrow .name { font: 800 14px/1.2 var(--font-heading); letter-spacing: -.01em; }
+.listrow .goal { font: 400 13.5px/1.35 var(--font-body); text-wrap: pretty; }
+/* Named metaline, not foot: .sheet .foot is the sheet's own footer bar, and
+   a row inside a sheet would inherit its 2px top rule. */
+.listrow .metaline { display: flex; align-items: baseline; gap: 10px; }
+.listrow .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A recurrence count is the strongest signal on the list; give it the accent. */
+.listrow .label.repeat { color: var(--color-accent-700); }
+
+/* Top-aligned, so the buttons sit on the row's first line rather than
+   floating at its middle beside a body of variable height. */
+.rowactions {
+  display: flex; align-items: flex-start; justify-content: flex-end;
+  gap: 6px; flex-wrap: wrap; padding: 11px 14px 11px 0; max-width: 250px;
+}
+
+/* The defaults form, folded away exactly as a proposal's edit form is. */
+.listrow .edit { margin-top: 3px; }
+.listrow .edit > summary { cursor: pointer; width: max-content; }
+.listrow .edit > summary:hover { color: var(--color-accent-700); }
+.listrow .edit form {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 9px; padding-left: 10px; border-left: 2px solid var(--color-divider);
+}
+.listrow .edit .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+/* The three headline numbers. Agent time comes first because it is the one
+   that is true whatever provider served the work. */
+.ledger {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 2px solid var(--color-text);
+}
+.ledger > div {
+  display: flex; flex-direction: column; gap: 4px; padding: 13px 14px;
+  border-left: 1px solid var(--color-divider);
+}
+.ledger > div:first-child { border-left: 0; }
+.ledger .amount { font: 800 22px/1 var(--font-heading); letter-spacing: -.02em; }
+.ledger .amount.metered { color: var(--color-accent-700); }
+.ledger-note {
+  margin: 0; padding: 10px 14px 12px;
+  font: 400 11.5px/1.5 var(--font-body); color: var(--mute);
+  border-bottom: 1px solid var(--color-divider); text-wrap: pretty;
+}
+
+/* The add box, pinned to the end of the list rather than floating above it. */
+.addbar {
+  display: flex; align-items: flex-end; gap: 10px;
+  padding: 13px 14px; background: var(--color-surface);
+  border-top: 2px solid var(--color-divider);
+}
+
+/* The group header is the board's, with room for the sentence explaining
+   where a source's items come from. */
+.grouphead.stacked { flex-wrap: wrap; padding: 8px 14px; }
+.grouphead.stacked .blurb { flex-basis: 100%; text-wrap: pretty; }
+
+.repo-tabs {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 11px 14px; border-bottom: 1px solid var(--color-divider);
+}
+.repo-tabs .chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border: 1px solid var(--color-divider);
+  font: 400 11px/1.4 var(--font-mono); color: var(--color-text); text-decoration: none;
+}
+.repo-tabs .chip:hover { border-color: var(--color-accent); text-decoration: none; }
+.repo-tabs .chip.on { border-color: var(--color-text); background: var(--color-text); color: var(--color-neutral-100); }
+.repo-tabs .chip.on .count { background: var(--color-neutral-100); color: var(--color-text); }
+
+@media (max-width: 700px) {
+  .listrow { grid-template-columns: 3px minmax(0, 1fr); }
+  .rowactions { grid-column: 2; max-width: none; padding: 0 14px 12px; justify-content: flex-start; }
+  .ledger { grid-template-columns: minmax(0, 1fr); }
+  .ledger > div { border-left: 0; border-top: 1px solid var(--color-divider); }
+  .listrow .edit .pair { grid-template-columns: 1fr; }
+}

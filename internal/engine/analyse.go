@@ -36,24 +36,21 @@ func (e *Engine) analysisTimeout() time.Duration {
 // cannot get further than the first screen with a directory that is not a git
 // repository.
 func (e *Engine) StartProposal(ctx context.Context, repoPath string) (store.Proposal, error) {
-	repoPath = strings.TrimSpace(repoPath)
-	if repoPath == "" {
-		return store.Proposal{}, fmt.Errorf("no repository path given")
-	}
-	abs, err := filepath.Abs(repoPath)
+	// Registering here is what makes an analysis part of a repository's
+	// history rather than a loose row: EnsureRepo resolves, validates and
+	// probes the path, which is everything the wizard's first screen needs.
+	repo, err := e.ResolveRepo(ctx, repoPath)
 	if err != nil {
-		return store.Proposal{}, fmt.Errorf("resolve %s: %w", repoPath, err)
-	}
-	if err := checkRepo(ctx, abs); err != nil {
 		return store.Proposal{}, err
 	}
 
 	p, err := e.Store.CreateProposal(ctx, store.Proposal{
-		RepoPath: abs,
+		RepoID:   repo.ID,
+		RepoPath: repo.Path,
 		State:    store.ProposalDraft,
 		Model:    e.Cfg.AnalysisModel,
 		MaxTasks: 12,
-		Detected: probeRepo(ctx, abs),
+		Detected: repo.Detected,
 	})
 	if err != nil {
 		return store.Proposal{}, err
@@ -103,9 +100,18 @@ func (e *Engine) clone(ctx context.Context, proposalID int64, url string) {
 	if getErr != nil {
 		return
 	}
-	p.RepoPath = path
+	// The clone is a repository like any other: registering it here is what
+	// lets a second analysis of the same import add to the first one's history
+	// instead of starting over.
+	repo, err := e.EnsureRepo(ctx, path)
+	if err != nil {
+		e.failProposal(ctx, proposalID, err.Error(), agent.Result{})
+		return
+	}
+	p.RepoID = repo.ID
+	p.RepoPath = repo.Path
 	p.State = store.ProposalDraft
-	p.Detected = probeRepo(ctx, path)
+	p.Detected = repo.Detected
 	if err := e.Store.SaveProposal(ctx, p); err != nil {
 		return
 	}
@@ -296,8 +302,11 @@ func (e *Engine) runAnalysisAgent(ctx context.Context, p *store.Proposal, prompt
 	}
 
 	transcript := filepath.Join(runDir, "analysis.jsonl")
-	if p.TranscriptPath != transcript {
+	if p.TranscriptPath != transcript || p.Provider != role.Provider {
 		p.TranscriptPath = transcript
+		// Recording which provider served the run is what lets its usage be
+		// attributed later as subscription-covered or actually metered.
+		p.Provider = role.Provider
 		if err := e.Store.SaveProposal(ctx, *p); err != nil {
 			return agent.Result{}, err
 		}
@@ -413,6 +422,19 @@ func (e *Engine) QueueProposal(ctx context.Context, proposalID int64) ([]store.T
 		}
 	}
 
+	// Whatever was not queued goes on the repository's backlog. Before this it
+	// existed only inside the proposal, findable if you remembered which
+	// analysis it was; now it is a working list item, deduplicated against
+	// everything else already known about the repository. Dropped on error:
+	// the tasks were created and reporting a backlog failure as a queue
+	// failure would suggest they were not.
+	//
+	// The rows are re-read because the loop above set CreatedTaskID on the
+	// ones it queued, and those must not be filed.
+	if fresh, err := e.Store.ProposalTasks(ctx, proposalID); err == nil {
+		_ = e.recordBacklogProposals(ctx, p, fresh)
+	}
+
 	// The analysis stays reviewable while any of its tasks are still
 	// unqueued: that is what makes coming back for the rest possible. Only a
 	// proposal with nothing left is finished.
@@ -427,10 +449,18 @@ func (e *Engine) QueueProposal(ctx context.Context, proposalID int64) ([]store.T
 }
 
 // DiscardProposal throws a proposal away without queueing anything.
+//
+// The list still goes on the backlog. "Not now" is the usual reason to discard
+// an analysis, and it is a different thing from "none of this was worth doing";
+// an operator who means the latter dismisses the items, which is one action on
+// a list that at least exists.
 func (e *Engine) DiscardProposal(ctx context.Context, proposalID int64) error {
 	p, err := e.Store.GetProposal(ctx, proposalID)
 	if err != nil {
 		return err
+	}
+	if rows, err := e.Store.ProposalTasks(ctx, proposalID); err == nil {
+		_ = e.recordBacklogProposals(ctx, p, rows)
 	}
 	p.State = store.ProposalDiscarded
 	if err := e.Store.SaveProposal(ctx, p); err != nil {

@@ -100,6 +100,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /analyse/{id}/task/{taskID}", s.requireSameOrigin(s.handleAnalyseTask))
 	mux.HandleFunc("POST /analyse/{id}/queue", s.requireSameOrigin(s.handleAnalyseQueue))
 	mux.HandleFunc("POST /analyse/{id}/discard", s.requireSameOrigin(s.handleAnalyseDiscard))
+	mux.HandleFunc("POST /repos", s.requireSameOrigin(s.handleAddRepo))
+	mux.HandleFunc("POST /repos/{id}/archive", s.requireSameOrigin(s.handleArchiveRepo))
+	mux.HandleFunc("POST /backlog", s.requireSameOrigin(s.handleAddBacklog))
+	mux.HandleFunc("POST /backlog/{id}/queue", s.requireSameOrigin(s.handleQueueBacklog))
+	mux.HandleFunc("POST /backlog/{id}/dismiss", s.requireSameOrigin(s.handleDismissBacklog))
 	mux.HandleFunc("GET /task/{id}/transcript/{stepID}", s.handleTranscript)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok\n"))

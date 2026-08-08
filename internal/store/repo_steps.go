@@ -10,11 +10,15 @@ import (
 
 // Step is one agent invocation: a Claude turn or a Codex review.
 type Step struct {
-	ID             int64
-	TaskID         int64
-	Phase          string
-	Iteration      int
-	Agent          string
+	ID        int64
+	TaskID    int64
+	Phase     string
+	Iteration int
+	Agent     string
+	// Provider is the configured provider that served this step. It is what
+	// tells subscription-covered CLI usage apart from usage metered against an
+	// endpoint the operator supplied, after the fact.
+	Provider       string
 	State          string
 	StartedAt      time.Time
 	EndedAt        time.Time
@@ -53,10 +57,10 @@ func (s *Store) StartStep(ctx context.Context, st Step) (Step, error) {
 	st.State = "running"
 	st.StartedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO steps (task_id, phase, iteration, agent, state, started_at,
-			transcript_path)
-		VALUES (?,?,?,?,?,?,?)`,
-		st.TaskID, st.Phase, st.Iteration, st.Agent, st.State,
+		INSERT INTO steps (task_id, phase, iteration, agent, provider, state,
+			started_at, transcript_path)
+		VALUES (?,?,?,?,?,?,?,?)`,
+		st.TaskID, st.Phase, st.Iteration, st.Agent, st.Provider, st.State,
 		st.StartedAt.Format(rfc3339), st.TranscriptPath)
 	if err != nil {
 		return Step{}, fmt.Errorf("insert step: %w", err)
@@ -110,9 +114,9 @@ func (s *Store) FinishStep(ctx context.Context, st Step, findings []Finding) err
 	return tx.Commit()
 }
 
-const stepColumns = `id, task_id, phase, iteration, agent, state, started_at,
-	ended_at, exit_code, verdict, input_tokens, output_tokens, cost_usd,
-	transcript_path, err_msg`
+const stepColumns = `id, task_id, phase, iteration, agent, provider, state,
+	started_at, ended_at, exit_code, verdict, input_tokens, output_tokens,
+	cost_usd, transcript_path, err_msg`
 
 // ListSteps returns a task's steps in chronological order.
 func (s *Store) ListSteps(ctx context.Context, taskID int64) ([]Step, error) {
@@ -128,8 +132,8 @@ func (s *Store) ListSteps(ctx context.Context, taskID int64) ([]Step, error) {
 		var st Step
 		var started, ended string
 		if err := rows.Scan(&st.ID, &st.TaskID, &st.Phase, &st.Iteration,
-			&st.Agent, &st.State, &started, &ended, &st.ExitCode, &st.Verdict,
-			&st.InputTokens, &st.OutputTokens, &st.CostUSD,
+			&st.Agent, &st.Provider, &st.State, &started, &ended, &st.ExitCode,
+			&st.Verdict, &st.InputTokens, &st.OutputTokens, &st.CostUSD,
 			&st.TranscriptPath, &st.ErrMsg); err != nil {
 			return nil, fmt.Errorf("scan step: %w", err)
 		}

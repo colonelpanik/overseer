@@ -22,6 +22,8 @@ Requires `claude`, `codex`, `git`, and `gh` on PATH.
     overseer submit tasks.example.yaml
     overseer serve                      # daemon + dashboard on :7777
     overseer status                     # same information as a table
+    overseer repos                      # per-repository time, turns and usage
+    overseer backlog                    # what each repository still has waiting
     overseer logs 3                     # one task's steps, verdicts, findings
 
 Do not know what to put in the task list? Open the dashboard and press
@@ -179,15 +181,91 @@ Three things are true of the analysis and worth knowing:
   A clone lands in `<data_dir>/imported/<name>`; an existing clone of the same
   remote is reused, and a directory holding a clone of something else is an
   error rather than an overwrite.
-- **It costs money and the dashboard says so.** Analysis spend is part of the
-  run total in the header, not a separate figure you have to go looking for.
+- **What it used is visible.** An analysis's usage is part of the header's
+  figures and its repository's totals, not something you have to go looking
+  for. Whether that usage is money depends on which provider served it — see
+  *what the money figures mean* below.
 
 The **analyse** role picks the model (see Models and providers above), and the
 wizard's own dropdown can override it for a single run. It is a separate knob
 from whatever runs the loop: the analysis reads once and writes nothing, so it
 is worth spending less on than the turns that produce the change.
 
-## Spend caps
+## Repositories
+
+A repository is registered the first time you submit or analyse against it, so
+**an existing task file keeps working unchanged** and the repo list fills
+itself in. **Repos** on the dashboard, or `overseer repos`, is then the answer
+to "what has this repository cost me" — tasks, analyses, agent time, turns,
+usage, and how many things are still on its backlog.
+
+Once a repository is registered, `repo:` may name it instead of repeating the
+path:
+
+```yaml
+tasks:
+  - repo: overseer          # the slug, not /home/kal/code/overseer
+    goal: Enable WAL mode on the store connection.
+```
+
+Two repositories whose directories share a basename — a vendored copy, or the
+same project checked out twice — get distinct slugs (`widget`, `widget-2`) and
+stay distinct everywhere, including the board's group headers.
+
+A repository carries defaults new tasks inherit. Settings resolve **task > repo
+> daemon default**, and empty at any level means "fall through", never "off":
+
+| setting | task file | repo | daemon |
+| --- | --- | --- | --- |
+| verify command | `verify:` | Repos overlay | `verify_command` |
+| blocking threshold | `blocking_severity:` | Repos overlay | `blocking_severity` |
+| cost cap | `cost_cap:` | Repos overlay | `task_cap_usd` |
+
+Archiving a repository hides it from the pickers and deletes nothing: its
+tasks, analyses and backlog stay where they are, because the record of what was
+done to a repository outlives your interest in it.
+
+## The backlog
+
+Each repository has a durable todo list, fed by three sources and deduplicated
+by fingerprint:
+
+- **Reviews.** A finding *below* the task's blocking threshold is one the loop
+  deliberately did not act on. It used to be displayed on the finding ledger
+  and could never become anything; now it lands here with its `file:line` and
+  which task raised it. Blocking findings are not copied — the loop is already
+  acting on those.
+- **Analyses.** Queueing three of twelve puts the other nine here. The analysis
+  stays on **Analyses** as the record of one run; the backlog is the working
+  list.
+- **You.** A form on the panel.
+
+The fingerprint is why a nit the reviewer raises on three separate tasks is one
+item reading **seen 3×** rather than three identical rows — and why dismissing
+one makes it stay dismissed instead of coming back on every review that notices
+it again.
+
+**Queue it** turns an item into a task through the ordinary submit path,
+inheriting the repository's defaults, with the item's evidence carried into the
+task's constraints so the agent starts from the citation instead of
+rediscovering it.
+
+## Spend caps, and what the money figures mean
+
+**The default `claude` and `codex` providers run against your subscription**,
+through each CLI's own stored login. What those CLIs report as `total_cost_usd`
+is what the usage *would* have cost through the API — a usage signal, not a
+bill. Only a provider you configured yourself with a `base_url` and a `key_env`
+is metered to you.
+
+So the dashboard shows two figures and never adds them together:
+
+- **reported** — subscription-covered CLI usage, priced as if it had gone
+  through the API.
+- **metered** — usage against an endpoint you supplied. This one is money.
+
+Per-repository accounting leads with **agent time** and **turns** for the same
+reason: those are true whatever provider served the work.
 
 `run_cap_usd` and `task_cap_usd` are **advisory**. Passing one raises a banner
 on the dashboard, next to a button that raises the cap; it does not stop
@@ -197,8 +275,8 @@ for getting there. The cap tells you a task has gone further than you expected,
 which is the decision you actually wanted to make — not a kill switch that
 makes the mess worse.
 
-A per-task cap can be set in the batch file with `cost_cap`, or raised from the
-dashboard.
+A per-task cap can be set in the batch file with `cost_cap`, on the repository,
+or raised from the dashboard.
 
 ## Dependencies
 

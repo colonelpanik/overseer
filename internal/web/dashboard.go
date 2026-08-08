@@ -43,6 +43,15 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 		return nil, err
 	}
 
+	repos, err := s.store.ListRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	repoByID := make(map[int64]store.Repo, len(repos))
+	for _, r := range repos {
+		repoByID[r.ID] = r
+	}
+
 	byID := make(map[int64]store.Task, len(tasks))
 	for _, t := range tasks {
 		byID[t.ID] = t
@@ -54,6 +63,14 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 	all := make([]taskFacts, 0, len(tasks))
 	for _, t := range tasks {
 		f := taskFacts{Task: t, Totals: totals[t.ID], Rounds: roundsOf(reviews[t.ID])}
+		// The group header names the registered repository, not the path's
+		// basename. Grouping by basename silently merged /a/widget with
+		// /b/vendor/widget into one heading whose totals belonged to neither.
+		if r, ok := repoByID[t.RepoID]; ok {
+			f.RepoSlug = r.Slug
+		} else {
+			f.RepoSlug = repoName(t.RepoPath)
+		}
 		for _, id := range deps[t.ID] {
 			dep, ok := byID[id]
 			if !ok || dep.State == "done" {
@@ -78,34 +95,42 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 		CLIText:     cliText(all, s.cfg.MaxParallel, s.eng.SandboxNote, s.cfg.RunCapUSD),
 	}
 
-	var runSpend float64
 	running := 0
 	for _, f := range all {
-		runSpend += f.Totals.CostUSD
 		if Tone(f.Task.State) == ToneLive {
 			running++
 		}
 	}
-	// Repository analyses cost real money and belong to no task, so leaving
-	// them out would make the headline figure quietly wrong.
-	analysisSpend, err := s.store.ProposalSpend(ctx)
+	// The two figures are kept apart, here and everywhere else. The default
+	// claude and codex providers run on the operator's subscription, so what
+	// those CLIs report is what the usage would have cost through the API — a
+	// usage signal, not a bill. Only a provider configured with its own
+	// endpoint is money. Presenting one total would be the dashboard lying,
+	// which is the one thing the rest of this project is careful not to do.
+	reported, metered, err := s.eng.RepoSpend(ctx)
 	if err != nil {
 		return nil, err
 	}
-	runSpend += analysisSpend
 	d.RunSummary = fmt.Sprintf("%s · %d running · max_parallel %d",
 		plural(len(all), "task"), running, s.cfg.MaxParallel)
-	d.Spend = money(runSpend)
+	d.Spend = money(reported)
+	d.Metered = money(metered)
+	d.HasMetered = metered > 0
+	// The cap is stated against reported usage, since that is what the
+	// subscription-driven default actually accumulates.
 	if s.cfg.RunCapUSD > 0 {
 		d.RunCap = "/ " + money(s.cfg.RunCapUSD) + " run cap"
-		d.OverRunCap = runSpend > s.cfg.RunCapUSD
+		d.OverRunCap = reported+metered > s.cfg.RunCapUSD
 	}
 	d.Budget = budgetAlert(all, q)
 	d.Toast = parkedToast(all, q)
-	d.Add = s.addForm(all)
+	d.Add = s.addForm(all, repos, q)
 
 	var visible []taskFacts
 	for _, f := range all {
+		if q.Repo != 0 && f.Task.RepoID != q.Repo {
+			continue
+		}
 		if keep(f.Task, q.Filter) && matches(f.Task, q.Search) {
 			visible = append(visible, f)
 		}
@@ -143,6 +168,24 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 		settings := s.buildSettings(q)
 		settings.Saved = q.Saved
 		d.Settings = &settings
+	}
+
+	if q.Overlay == "repos" {
+		if d.Repos, err = s.buildRepos(ctx, q); err != nil {
+			return nil, err
+		}
+	}
+	if q.Overlay == "backlog" {
+		if d.Backlog, err = s.buildBacklog(ctx, q); err != nil {
+			return nil, err
+		}
+	}
+	// The chip is on the nav whatever overlay is open: a repository filter you
+	// cannot see is a board that looks empty for no stated reason.
+	d.RepoChip = repoChip(repoByID, q)
+	d.OpenBacklog, err = s.openBacklogTotal(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	if q.Wizard != 0 {
@@ -383,30 +426,34 @@ func parkedToast(all []taskFacts, q Query) *Toast {
 	}
 }
 
-// addForm offers the repositories and dependencies already in play, so
-// queueing a second task against the same repo is a click rather than a path
-// typed out again.
-func (s *Server) addForm(all []taskFacts) AddForm {
-	seen := map[string]bool{}
-	var repos []string
+// addForm offers the registered repositories and the dependencies already in
+// play, so queueing a second task against the same repo is a click rather than
+// a path typed out again.
+func (s *Server) addForm(all []taskFacts, repos []store.Repo, q Query) AddForm {
+	choices := make([]RepoChoice, 0, len(repos))
+	for _, r := range repos {
+		if r.Archived() {
+			continue
+		}
+		choices = append(choices, RepoChoice{
+			ID: r.ID, Slug: r.Slug, Path: r.Path, On: r.ID == q.Repo,
+		})
+	}
+	sort.Slice(choices, func(i, j int) bool { return choices[i].Slug < choices[j].Slug })
+
 	var deps []DepChoice
 	for _, f := range all {
-		if !seen[f.Task.RepoPath] {
-			seen[f.Task.RepoPath] = true
-			repos = append(repos, f.Task.RepoPath)
-		}
 		if f.Task.State != "done" && f.Task.State != "failed" {
 			deps = append(deps, DepChoice{
 				ID: f.Task.ID, Slug: f.Task.Slug, State: f.Task.State,
 			})
 		}
 	}
-	sort.Strings(repos)
 	if len(deps) > 12 {
 		deps = deps[:12]
 	}
 	return AddForm{
-		Repos:      repos,
+		Repos:      choices,
 		Deps:       deps,
 		Severities: []string{"any", "minor", "major", "critical"},
 		Severity:   s.cfg.BlockingSeverity,

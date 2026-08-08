@@ -470,3 +470,123 @@ func TestAnalysisSandboxLayersTheRealAgentConfigReadOnly(t *testing.T) {
 		t.Error("the per-run state directory is not standing in for ~/.claude")
 	}
 }
+
+// A proposal is a record of one run; the backlog is the working list. What was
+// not queued used to exist only inside the proposal, findable if you
+// remembered which analysis it was.
+func TestQueueProposalFilesTheUnqueuedTasksOnTheBacklog(t *testing.T) {
+	h := newHarness(t, fakeAnalyst(t, twoTaskProposal), "true")
+	ctx := context.Background()
+
+	p, err := h.eng.StartProposal(ctx, h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.RepoID == 0 {
+		t.Fatal("StartProposal did not register the repository")
+	}
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitForProposal(t, h, p.ID, store.ProposalReady)
+
+	// Deselect the second, so exactly one task is queued and one is left.
+	rows, err := h.st.ProposalTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows[1].Selected = false
+	if err := h.st.SaveProposalTask(ctx, rows[1]); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := h.eng.QueueProposal(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("QueueProposal: %v", err)
+	}
+	if len(created) != 1 {
+		t.Fatalf("created = %d, want 1", len(created))
+	}
+
+	items, err := h.st.ListBacklog(ctx, p.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("backlog has %d items, want just the unqueued task: %+v", len(items), items)
+	}
+	got := items[0]
+	if got.Title != rows[1].Goal {
+		t.Errorf("Title = %q, want the unqueued task's goal", got.Title)
+	}
+	if got.Source != store.BacklogAnalysis {
+		t.Errorf("Source = %q, want analysis", got.Source)
+	}
+	if len(got.Evidence) == 0 {
+		t.Error("the analysis's evidence did not reach the backlog item")
+	}
+	if got.ProposalTaskID != rows[1].ID {
+		t.Errorf("ProposalTaskID = %d, want %d", got.ProposalTaskID, rows[1].ID)
+	}
+}
+
+// "Not now" is the usual reason to discard an analysis, and it is a different
+// thing from "none of this was worth doing".
+func TestDiscardProposalStillKeepsTheList(t *testing.T) {
+	h := newHarness(t, fakeAnalyst(t, twoTaskProposal), "true")
+	ctx := context.Background()
+
+	p, err := h.eng.StartProposal(ctx, h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitForProposal(t, h, p.ID, store.ProposalReady)
+
+	if err := h.eng.DiscardProposal(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	items, err := h.st.ListBacklog(ctx, p.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("backlog has %d items, want both proposed tasks", len(items))
+	}
+}
+
+// The provider that served an analysis is what lets its usage be attributed as
+// subscription-covered or actually metered.
+func TestAnalysisRecordsItsProvider(t *testing.T) {
+	h := newHarness(t, fakeAnalyst(t, twoTaskProposal), "true")
+	ctx := context.Background()
+
+	p, err := h.eng.StartProposal(ctx, h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
+		t.Fatal(err)
+	}
+	done := waitForProposal(t, h, p.ID, store.ProposalReady)
+	if done.Provider == "" {
+		t.Error("the analysis recorded no provider")
+	}
+
+	stats, err := h.eng.RepoStats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := stats[p.RepoID]
+	if got.Analyses != 1 {
+		t.Errorf("Analyses = %d, want 1", got.Analyses)
+	}
+	if got.Reported <= 0 {
+		t.Errorf("Reported = %v, want the analysis's reported usage", got.Reported)
+	}
+	if got.Metered != 0 {
+		t.Errorf("Metered = %v, want 0 for a subscription-covered CLI run", got.Metered)
+	}
+}

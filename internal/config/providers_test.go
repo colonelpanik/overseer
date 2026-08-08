@@ -281,3 +281,33 @@ func TestSaveProvidersAndRolesCreatesAMissingFile(t *testing.T) {
 		t.Errorf("mode = %v, want 0600", perm)
 	}
 }
+
+// The correction this split exists for: the default claude and codex providers
+// run against the operator's subscription through the CLI's own login, so what
+// those CLIs report is a usage signal, not a bill. Only an endpoint the
+// operator supplied is money.
+func TestOnlyABringYourOwnEndpointIsMetered(t *testing.T) {
+	c := Default()
+	for name, p := range c.Providers {
+		if p.Metered() {
+			t.Errorf("default provider %q reports as metered; it runs on the CLI's own login", name)
+		}
+	}
+
+	c.Providers["inhouse"] = Provider{
+		Kind:    KindOpenAI,
+		BaseURL: "https://llm.internal.example/v1",
+		KeyEnv:  "INHOUSE_KEY",
+	}
+	if !c.Providers["inhouse"].Metered() {
+		t.Error("a provider with its own base_url is the operator's own money and must be metered")
+	}
+
+	metered := c.MeteredProviders()
+	if !metered["inhouse"] {
+		t.Errorf("MeteredProviders = %v, want inhouse", metered)
+	}
+	if len(metered) != 1 {
+		t.Errorf("MeteredProviders = %v, want only the configured endpoint", metered)
+	}
+}

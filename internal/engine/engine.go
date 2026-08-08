@@ -538,7 +538,7 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 
 	step, err := e.Store.StartStep(ctx, store.Step{
 		TaskID: task.ID, Phase: phase, Iteration: task.Iteration,
-		Agent: name, TranscriptPath: transcript,
+		Agent: name, Provider: role.Provider, TranscriptPath: transcript,
 	})
 	if err != nil {
 		return agent.Result{}, store.Step{}, err
@@ -660,6 +660,12 @@ func (e *Engine) recordFindings(ctx context.Context, task *store.Task, step stor
 	if err := e.Store.FinishStep(ctx, step, findings); err != nil {
 		return err
 	}
+	// Findings the loop deliberately did not act on go on the repository's
+	// backlog rather than being displayed once and thrown away. Deliberately
+	// dropped on error: a task's outcome does not depend on its backlog, and
+	// failing a turn that otherwise succeeded over a mislaid nit would be the
+	// worse trade by a wide margin.
+	_ = e.recordBacklogFindings(ctx, task, findings)
 	e.notify(task.ID)
 	return nil
 }

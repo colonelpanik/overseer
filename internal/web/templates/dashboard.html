@@ -13,13 +13,31 @@
     <a class="nav-brand" href="/" style="color:inherit">OVERSEER</a>
     <span class="label rule">{{.RunSummary}}</span>
     {{if .SandboxNote}}<span class="label">{{.SandboxNote}}</span>{{end}}
+    {{with .RepoChip}}
+    {{/* A filter the operator cannot see is a board that looks empty for no
+         stated reason. */}}
+    <a class="repo-chip" href="{{.ClearURL}}" title="show every repository">
+      {{.Slug}} <span class="x">×</span>
+    </a>
+    {{end}}
     <span class="spacer"></span>
     <span class="live label" id="live">connecting…</span>
     <div class="spend{{if .OverRunCap}} over{{end}}">
-      <span class="label">run spend</span>
+      {{/* Two figures, never one. The claude and codex CLIs run on your
+           subscription, so what they report is what the usage would cost
+           through the API — a usage signal, not a bill. Only an endpoint you
+           configured yourself is money. */}}
+      <span class="label">reported</span>
       <span class="amount">{{.Spend}}</span>
       {{if .RunCap}}<span class="small">{{.RunCap}}</span>{{end}}
     </div>
+    {{if .HasMetered}}
+    <div class="spend metered">
+      <span class="label">metered</span>
+      <span class="amount">{{.Metered}}</span>
+      <span class="small">your endpoint</span>
+    </div>
+    {{end}}
     <a class="btn btn-secondary btn-mono" href="{{.Q.URL "overlay" "cli"}}">$ overseer status</a>
     {{with .Running}}
     {{/* The wizard lives in the URL, so closing that tab loses the only link
@@ -28,6 +46,8 @@
       {{if .Live}}<span class="pip"></span>{{end}}{{.Label}}
     </a>
     {{end}}
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "repos"}}">Repos</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "backlog"}}">Backlog{{if .OpenBacklog}} <span class="count">{{.OpenBacklog}}</span>{{end}}</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "analyses"}}">Analyses</a>
     <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardNew}}">Analyse a repo</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "settings"}}">Models</a>
@@ -709,6 +729,231 @@
 </div>
 {{end}}
 
+{{with .Repos}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Repositories</h4>
+      <span class="small">{{len .Rows}} registered · {{.AgentTime}} agent time</span>
+      <span class="spacer"></span>
+      <a class="btn btn-ghost" href="{{.CloseURL}}">close</a>
+    </div>
+    <div class="body sheet-list">
+      <div class="ledger">
+        <div><span class="label">agent time</span><span class="amount">{{.AgentTime}}</span></div>
+        <div><span class="label">reported</span><span class="amount">{{.Reported}}</span></div>
+        <div><span class="label">metered</span><span class="amount metered">{{.Metered}}</span></div>
+      </div>
+      <p class="ledger-note">{{.Note}}</p>
+
+      {{if .Empty}}
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">No repositories yet</div>
+          <p class="muted" style="font-size:13px;max-width:44ch">One registers itself the first time you queue a task
+            or run an analysis against it, so this fills in on its own — or add one below.</p>
+        </div>
+      {{else}}
+      {{range .Rows}}
+      {{/* Same anatomy as a task row: a 3px tone rail, a body of stacked lines,
+           and the meta on a foot line. A repository reads the way a task does
+           because it is the same kind of thing to scan. */}}
+      <div class="listrow{{if .Archived}} off{{end}}{{if .Analysing}} tone-live{{else}} tone-muted{{end}}">
+        <span class="rail"></span>
+        <div class="body">
+          <span class="line">
+            <span class="dot"></span>
+            <span class="name">{{.Slug}}</span>
+            {{if .Archived}}<span class="label">archived</span>{{end}}
+            {{if .Analysing}}<span class="label state">analysing</span>{{end}}
+            <span class="spacer"></span>
+            <span class="small">{{.Counts}}</span>
+          </span>
+          <span class="small mono path">{{.Path}}</span>
+          {{if .Detected}}<span class="small">{{.Detected}}</span>{{end}}
+          <span class="metaline">
+            <span class="small">{{.AgentTime}} · {{.Turns}}</span>
+            <span class="spacer"></span>
+            <span class="small">{{.Reported}} reported{{if ne .Metered "$0.00"}} · <span class="accent">{{.Metered}} metered</span>{{end}}</span>
+          </span>
+          {{if .Defaults}}<span class="small mono">inherited: {{.Defaults}}</span>{{end}}
+
+          {{/* Behind a disclosure, the way a proposal's edit form is: five
+               repositories otherwise means five identical forms stacked down
+               the page, which buries the numbers they belong to. */}}
+          <details class="edit">
+            <summary class="small">Defaults new tasks inherit</summary>
+            <form method="post" action="/repos">
+              <input type="hidden" name="path" value="{{.Path}}">
+              <div class="pair">
+                <div class="field">
+                  <label for="rv-{{.ID}}">Verify command</label>
+                  <input class="input" id="rv-{{.ID}}" name="verify" value="{{.Verify}}" placeholder="inherits the daemon default">
+                </div>
+                <div class="field">
+                  <label for="rc-{{.ID}}">Task cap (USD)</label>
+                  <input class="input" id="rc-{{.ID}}" name="cost_cap" value="{{.Cap}}" inputmode="decimal" placeholder="inherit">
+                </div>
+              </div>
+              <div class="pair">
+                <div class="field">
+                  <label for="rs-{{.ID}}">Blocks on</label>
+                  {{$sev := .Severity}}
+                  <select class="input" id="rs-{{.ID}}" name="blocking_severity">
+                    <option value="" {{if eq $sev ""}}selected{{end}}>inherit the daemon default</option>
+                    <option value="any" {{if eq $sev "any"}}selected{{end}}>any</option>
+                    <option value="minor" {{if eq $sev "minor"}}selected{{end}}>minor</option>
+                    <option value="major" {{if eq $sev "major"}}selected{{end}}>major</option>
+                    <option value="critical" {{if eq $sev "critical"}}selected{{end}}>critical</option>
+                  </select>
+                </div>
+                <div class="field" style="align-self:end">
+                  <button class="btn btn-secondary" type="submit">Save defaults</button>
+                </div>
+              </div>
+            </form>
+          </details>
+        </div>
+        <div class="rowactions">
+          <a class="btn btn-secondary" href="{{.BoardURL}}">Tasks</a>
+          <a class="btn {{if .Backlog}}btn-primary{{else}}btn-ghost{{end}}" href="{{.BacklogURL}}">
+            Backlog{{if .Backlog}} {{.Backlog}}{{end}}
+          </a>
+          <form class="inline" method="post" action="/repos/{{.ID}}/archive">
+            <input type="hidden" name="archived" value="{{if .Archived}}0{{else}}1{{end}}">
+            <button class="btn btn-ghost" type="submit">{{if .Archived}}Restore{{else}}Archive{{end}}</button>
+          </form>
+        </div>
+      </div>
+      {{end}}
+      {{end}}
+
+      <form class="addbar" method="post" action="/repos">
+        <div class="field" style="flex:1">
+          <label for="repo-path">Add a repository</label>
+          <input class="input" id="repo-path" name="path" required
+                 placeholder="/home/you/code/some-repo">
+        </div>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+    </div>
+    <div class="metaline">
+      <span class="small">Every task and analysis attributes to a repository, so its history adds up.</span>
+      <span class="spacer"></span>
+      <a class="btn btn-secondary" href="{{.CloseURL}}">Close</a>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{with .Backlog}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Backlog</h4>
+      <span class="small">{{if .RepoSlug}}{{.RepoSlug}} · {{.Open}} open of {{.Total}}{{else}}no repositories yet{{end}}</span>
+      <span class="spacer"></span>
+      {{if .BoardURL}}<a class="btn btn-secondary" href="{{.BoardURL}}">Its tasks</a>{{end}}
+      <a class="btn btn-ghost" href="{{.CloseURL}}">close</a>
+    </div>
+    <div class="body sheet-list">
+      {{if .Repos}}
+      <div class="repo-tabs">
+        {{range .Repos}}
+        <a class="chip{{if .On}} on{{end}}" href="{{.URL}}">{{.Slug}}{{if .Count}} <span class="count">{{.Count}}</span>{{end}}</a>
+        {{end}}
+      </div>
+      {{end}}
+
+      {{if not .RepoID}}
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">No repositories yet</div>
+          <p class="muted" style="font-size:13px;max-width:44ch">Queue a task or run an analysis and one registers
+            itself; its backlog starts filling from what reviews find.</p>
+        </div>
+      {{else}}
+
+      {{if .Empty}}
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">Nothing waiting</div>
+          <p class="muted" style="font-size:13px;max-width:44ch">Review findings below a task's blocking threshold
+            land here, along with anything an analysis proposed that you did not queue.</p>
+        </div>
+      {{end}}
+
+      {{range .Groups}}
+      {{/* The same sticky group header the board uses, so a grouped list reads
+           the same wherever it appears. */}}
+      <div class="grouphead stacked">
+        <span class="name">{{.Label}}</span>
+        <span class="small">{{len .Rows}}</span>
+        <span class="blurb small">{{.Blurb}}</span>
+      </div>
+      {{range .Rows}}
+      <div class="listrow tone-{{.Tone}}{{if ne .State "open"}} off{{end}}">
+        <span class="rail"></span>
+        <div class="body">
+          <span class="line">
+            <span class="dot"></span>
+            {{if .Severity}}<span class="label state">{{.Severity}}</span>{{end}}
+            {{if .Seen}}<span class="label repeat">{{.Seen}}</span>{{end}}
+            {{if eq .State "dismissed"}}<span class="label">dismissed</span>{{end}}
+            {{if eq .State "queued"}}<span class="label">task #{{.TaskID}}</span>{{end}}
+            <span class="spacer"></span>
+            <span class="small">{{.When}}</span>
+          </span>
+          <span class="goal">{{.Title}}</span>
+          {{if .Detail}}<span class="small">{{.Detail}}</span>{{end}}
+          <span class="metaline">
+            {{if .Origin}}<span class="small">{{.Origin}}</span>{{end}}
+            <span class="spacer"></span>
+            {{if .Evidence}}<span class="small mono path">{{join ", " .Evidence}}</span>{{end}}
+          </span>
+        </div>
+        <div class="rowactions">
+          {{if .Actions}}
+            <form class="inline" method="post" action="/backlog/{{.ID}}/queue">
+              <button class="btn btn-primary" type="submit">Queue it</button>
+            </form>
+            <form class="inline" method="post" action="/backlog/{{.ID}}/dismiss">
+              <input type="hidden" name="reopen" value="{{if eq .State "dismissed"}}1{{else}}0{{end}}">
+              <button class="btn btn-ghost" type="submit">{{if eq .State "dismissed"}}Reopen{{else}}Dismiss{{end}}</button>
+            </form>
+          {{else}}
+            <a class="btn btn-secondary" href="/task/{{.TaskID}}">Open task</a>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{end}}
+
+      <form class="addbar" method="post" action="/backlog">
+        <input type="hidden" name="repo_id" value="{{.RepoID}}">
+        <div class="field" style="flex:1">
+          <label for="bl-title">Write something down</label>
+          <input class="input" id="bl-title" name="title" required placeholder="What is worth doing here?">
+        </div>
+        <div class="field">
+          <label for="bl-sev">Severity</label>
+          <select class="input" id="bl-sev" name="severity">
+            {{range .Severities}}<option value="{{.}}">{{if .}}{{.}}{{else}}none{{end}}</option>{{end}}
+          </select>
+        </div>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+      {{end}}
+    </div>
+    <div class="metaline">
+      <span class="small">Queueing an item creates a task carrying its evidence and the repository's defaults.</span>
+      <span class="spacer"></span>
+      <a class="btn btn-secondary" href="{{.CloseURL}}">Close</a>
+    </div>
+  </div>
+</div>
+{{end}}
+
 {{with .Settings}}
 <div class="backdrop top">
   <div class="sheet wizard">
@@ -825,9 +1070,16 @@
       <div class="pair">
         <div class="field">
           <label for="repo">Repository</label>
+          {{/* Registered repositories by name, and a path not listed yet is
+               still accepted: registration is a side effect of use, not a gate
+               in front of it. */}}
           <input class="input" id="repo" name="repo" required list="repos"
-                 placeholder="/home/you/code/some-repo">
-          <datalist id="repos">{{range .Repos}}<option value="{{.}}">{{end}}</datalist>
+                 value="{{range .Repos}}{{if .On}}{{.Slug}}{{end}}{{end}}"
+                 placeholder="a repo name, or /home/you/code/some-repo">
+          <datalist id="repos">
+            {{range .Repos}}<option value="{{.Slug}}" label="{{.Path}}">{{end}}
+          </datalist>
+          <p class="muted" style="font-size:11px;margin:4px 0 0">a registered name, or any path — a new one registers itself</p>
         </div>
         <div class="field">
           <label for="verify">Verify command — runs before every review</label>

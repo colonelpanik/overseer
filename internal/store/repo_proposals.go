@@ -31,7 +31,10 @@ const (
 // Proposal is one repository analysis: what was asked for, what it cost, and
 // what state the wizard is in.
 type Proposal struct {
-	ID        int64
+	ID int64
+	// RepoID links the analysis to its repository, so a repo's history adds up.
+	// RepoPath stays alongside it as the resolved path.
+	RepoID    int64
 	RepoPath  string
 	SourceURL string
 	State     string
@@ -44,7 +47,10 @@ type Proposal struct {
 	// Detected is what the repository probe found: language, test command,
 	// default branch. Shown on the first screen so the operator can see the
 	// wizard understood the repo before paying for an analysis.
-	Detected       string
+	Detected string
+	// Provider is the configured provider that served the analysis, so its
+	// usage can be attributed the way a step's is.
+	Provider       string
 	CostUSD        float64
 	InputTokens    int
 	OutputTokens   int
@@ -78,8 +84,8 @@ type ProposalTask struct {
 	CreatedTaskID int64
 }
 
-const proposalColumns = `id, repo_path, source_url, state, focus, notes,
-	max_tasks, model, detected, cost_usd, input_tokens, output_tokens,
+const proposalColumns = `id, repo_id, repo_path, source_url, state, focus, notes,
+	max_tasks, model, detected, provider, cost_usd, input_tokens, output_tokens,
 	transcript_path, err_msg, created_at, updated_at`
 
 // CreateProposal inserts p and returns it with its ID and timestamps.
@@ -94,13 +100,13 @@ func (s *Store) CreateProposal(ctx context.Context, p Proposal) (Proposal, error
 	}
 
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO proposals (repo_path, source_url, state, focus, notes,
-			max_tasks, model, detected, cost_usd, input_tokens, output_tokens,
-			transcript_path, err_msg, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.RepoPath, p.SourceURL, p.State, strings.Join(p.Focus, "\n"), p.Notes,
-		p.MaxTasks, p.Model, p.Detected, p.CostUSD, p.InputTokens, p.OutputTokens,
-		p.TranscriptPath, p.ErrMsg,
+		INSERT INTO proposals (repo_id, repo_path, source_url, state, focus, notes,
+			max_tasks, model, detected, provider, cost_usd, input_tokens,
+			output_tokens, transcript_path, err_msg, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.RepoID, p.RepoPath, p.SourceURL, p.State, strings.Join(p.Focus, "\n"),
+		p.Notes, p.MaxTasks, p.Model, p.Detected, p.Provider, p.CostUSD,
+		p.InputTokens, p.OutputTokens, p.TranscriptPath, p.ErrMsg,
 		p.CreatedAt.Format(rfc3339), p.UpdatedAt.Format(rfc3339))
 	if err != nil {
 		return Proposal{}, fmt.Errorf("insert proposal: %w", err)
@@ -116,9 +122,10 @@ func (s *Store) CreateProposal(ctx context.Context, p Proposal) (Proposal, error
 func scanProposal(sc interface{ Scan(...any) error }) (Proposal, error) {
 	var p Proposal
 	var focus, created, updated string
-	err := sc.Scan(&p.ID, &p.RepoPath, &p.SourceURL, &p.State, &focus, &p.Notes,
-		&p.MaxTasks, &p.Model, &p.Detected, &p.CostUSD, &p.InputTokens,
-		&p.OutputTokens, &p.TranscriptPath, &p.ErrMsg, &created, &updated)
+	err := sc.Scan(&p.ID, &p.RepoID, &p.RepoPath, &p.SourceURL, &p.State, &focus,
+		&p.Notes, &p.MaxTasks, &p.Model, &p.Detected, &p.Provider, &p.CostUSD,
+		&p.InputTokens, &p.OutputTokens, &p.TranscriptPath, &p.ErrMsg,
+		&created, &updated)
 	if err != nil {
 		return Proposal{}, err
 	}
@@ -154,14 +161,14 @@ func (s *Store) GetProposal(ctx context.Context, id int64) (Proposal, error) {
 func (s *Store) SaveProposal(ctx context.Context, p Proposal) error {
 	p.UpdatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE proposals SET repo_path=?, source_url=?, state=?, focus=?,
-			notes=?, max_tasks=?, model=?, detected=?, cost_usd=?,
-			input_tokens=?, output_tokens=?, transcript_path=?, err_msg=?,
-			updated_at=?
+		UPDATE proposals SET repo_id=?, repo_path=?, source_url=?, state=?,
+			focus=?, notes=?, max_tasks=?, model=?, detected=?, provider=?,
+			cost_usd=?, input_tokens=?, output_tokens=?, transcript_path=?,
+			err_msg=?, updated_at=?
 		WHERE id=?`,
-		p.RepoPath, p.SourceURL, p.State, strings.Join(p.Focus, "\n"), p.Notes,
-		p.MaxTasks, p.Model, p.Detected, p.CostUSD, p.InputTokens,
-		p.OutputTokens, p.TranscriptPath, p.ErrMsg,
+		p.RepoID, p.RepoPath, p.SourceURL, p.State, strings.Join(p.Focus, "\n"),
+		p.Notes, p.MaxTasks, p.Model, p.Detected, p.Provider, p.CostUSD,
+		p.InputTokens, p.OutputTokens, p.TranscriptPath, p.ErrMsg,
 		p.UpdatedAt.Format(rfc3339), p.ID)
 	if err != nil {
 		return fmt.Errorf("update proposal: %w", err)

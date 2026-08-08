@@ -1,6 +1,67 @@
+-- A repository overseer works on. Registered once, so a path is typed once and
+-- everything — tasks, analyses, time, usage, the backlog — attributes to it.
+--
+-- The path is the identity, resolved to an absolute path before insert. The
+-- slug is only a short name for display and for naming a repo in a task file;
+-- two repositories whose directories share a basename get a suffixed slug the
+-- way colliding task slugs already do.
+CREATE TABLE IF NOT EXISTS repos (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug           TEXT NOT NULL UNIQUE,
+    path           TEXT NOT NULL UNIQUE,
+    origin_url     TEXT NOT NULL DEFAULT '',
+    default_branch TEXT NOT NULL DEFAULT '',
+    detected       TEXT NOT NULL DEFAULT '',
+    -- Defaults new tasks inherit. Resolution is task > repo > daemon default,
+    -- so an empty value here means "fall through", not "off".
+    verify_command    TEXT NOT NULL DEFAULT '',
+    blocking_severity TEXT NOT NULL DEFAULT '',
+    cost_cap_usd      REAL NOT NULL DEFAULT 0,
+    archived_at    TEXT NOT NULL DEFAULT '',
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
+-- A repository's durable todo list: things worth doing that nothing is doing
+-- yet. Fed by analyses (proposed tasks nobody queued), by reviews (findings
+-- below the blocking threshold, which the loop deliberately did not act on and
+-- which had nowhere to go), and by hand.
+CREATE TABLE IF NOT EXISTS backlog (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    -- analysis | review | manual
+    source      TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT '',
+    evidence    TEXT NOT NULL DEFAULT '',
+    severity    TEXT NOT NULL DEFAULT '',
+    -- fingerprint collapses the same item raised repeatedly into one row with
+    -- a count. A nit the reviewer raises on three separate tasks is one thing
+    -- to fix, and "seen three times" is a far stronger signal than three
+    -- identical rows.
+    fingerprint TEXT NOT NULL,
+    seen        INTEGER NOT NULL DEFAULT 1,
+    -- Where it came from, so an item can be traced back.
+    proposal_task_id INTEGER NOT NULL DEFAULT 0,
+    finding_id       INTEGER NOT NULL DEFAULT 0,
+    origin_task_id   INTEGER NOT NULL DEFAULT 0,
+    -- open | queued | dismissed
+    state           TEXT NOT NULL,
+    created_task_id INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_backlog_fingerprint ON backlog(repo_id, fingerprint);
+CREATE INDEX IF NOT EXISTS idx_backlog_repo ON backlog(repo_id, state);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     slug              TEXT NOT NULL UNIQUE,
+    -- The registered repository, and the resolved path it points at. The path
+    -- stays so every existing reader keeps working; repo_id is what makes a
+    -- repository's history add up.
+    repo_id           INTEGER NOT NULL DEFAULT 0,
     repo_path         TEXT NOT NULL,
     goal              TEXT NOT NULL,
     constraints       TEXT NOT NULL DEFAULT '',
@@ -48,6 +109,10 @@ CREATE TABLE IF NOT EXISTS steps (
     phase           TEXT NOT NULL,
     iteration       INTEGER NOT NULL,
     agent           TEXT NOT NULL,
+    -- Which configured provider served this step, so subscription-covered CLI
+    -- usage and usage metered against an endpoint the operator supplied can be
+    -- told apart rather than added into one misleading figure.
+    provider        TEXT NOT NULL DEFAULT '',
     state           TEXT NOT NULL,
     started_at      TEXT NOT NULL,
     ended_at        TEXT NOT NULL DEFAULT '',
@@ -87,6 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_findings_step ON findings(step_id);
 -- money it cost is visible rather than spent invisibly.
 CREATE TABLE IF NOT EXISTS proposals (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id         INTEGER NOT NULL DEFAULT 0,
     repo_path       TEXT NOT NULL DEFAULT '',
     source_url      TEXT NOT NULL DEFAULT '',
     -- draft | cloning | analysing | ready | queued | discarded | failed
@@ -96,6 +162,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     max_tasks       INTEGER NOT NULL DEFAULT 12,
     model           TEXT NOT NULL DEFAULT '',
     detected        TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
     -- Accumulated across regenerates: a re-ask really did cost what the first
     -- attempt cost plus the second.
     cost_usd        REAL NOT NULL DEFAULT 0,

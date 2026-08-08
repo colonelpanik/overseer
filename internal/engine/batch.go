@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -86,27 +85,25 @@ func ParseBatch(raw []byte) (Batch, error) {
 	return b, nil
 }
 
-// Submit queues one task after checking the repository is usable.
+// Submit queues one task against a registered repository.
+//
+// The repository is registered as a side effect, so a task file that names a
+// path — as every existing one does — keeps working unchanged while the repo
+// list fills itself in. `repo:` may equally name a registered repository by its
+// slug, which is the point of registering one: the path is typed once.
+//
+// Settings resolve task > repo > daemon default. An empty value at any level
+// means "fall through", never "off": a task that wants no verify gate is one
+// whose repository and daemon also configure none.
 func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--git-dir")
-	cmd.Dir = bt.Repo
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return store.Task{}, fmt.Errorf("%s is not a git repository: %v: %s",
-			bt.Repo, err, strings.TrimSpace(string(out)))
+	repo, err := e.ResolveRepo(ctx, bt.Repo)
+	if err != nil {
+		return store.Task{}, err
 	}
 
-	severity := bt.BlockingSeverity
-	if severity == "" {
-		severity = e.Cfg.BlockingSeverity
-	}
-	verify := bt.Verify
-	if verify == "" {
-		verify = e.Cfg.VerifyCommand
-	}
-	costCap := bt.CostCap
-	if costCap == 0 {
-		costCap = e.Cfg.TaskCapUSD
-	}
+	severity := firstNonEmpty(bt.BlockingSeverity, repo.BlockingSeverity, e.Cfg.BlockingSeverity)
+	verify := firstNonEmpty(bt.Verify, repo.VerifyCommand, e.Cfg.VerifyCommand)
+	costCap := firstNonZero(bt.CostCap, repo.CostCapUSD, e.Cfg.TaskCapUSD)
 
 	// Resolve dependency slugs before creating anything: a submit that names a
 	// task nobody has heard of should fail outright rather than queue a task
@@ -126,7 +123,8 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 
 	base := worktree.Slugify(bt.Goal)
 	task := store.Task{
-		RepoPath:         bt.Repo,
+		RepoID:           repo.ID,
+		RepoPath:         repo.Path,
 		Goal:             strings.TrimSpace(bt.Goal),
 		Constraints:      strings.Join(bt.Constraints, "\n"),
 		State:            string(loop.StateQueued),
@@ -157,6 +155,28 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 			return store.Task{}, err
 		}
 	}
+}
+
+// firstNonEmpty implements the task > repo > daemon fallback for a string
+// setting, where empty at each level means "fall through".
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// firstNonZero is the same fallback for a numeric setting. Zero means "no cap
+// configured here", which is why it falls through rather than winning.
+func firstNonZero(values ...float64) float64 {
+	for _, v := range values {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // SubmitBatch queues every task in a batch, returning what it created.

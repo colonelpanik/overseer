@@ -166,6 +166,23 @@ func remoteRefMissing(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "couldn't find remote ref")
 }
 
+// OriginURL reports the repository's origin remote, or an error if it has
+// none. It is a local config read with no network I/O, so it costs nothing
+// even when the remote is unreachable.
+//
+// This is display only: it is what lets the repo list show where a repository
+// came from. Nothing clones or fetches from it, so it is never run through
+// ValidateCloneURL — that check guards URLs an operator hands to `git clone`,
+// and applying it here would make a repository with an unusual but perfectly
+// working remote appear to have none.
+func OriginURL(ctx context.Context, repoPath string) (string, error) {
+	out, err := git(ctx, repoPath, "remote", "get-url", "origin")
+	if err != nil {
+		return "", fmt.Errorf("no origin remote: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // DefaultBranch reports the repository's default branch, preferring what
 // origin advertises and falling back to the current branch for repos with
 // no remote.

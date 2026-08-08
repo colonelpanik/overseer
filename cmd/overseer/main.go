@@ -35,6 +35,8 @@ Usage:
   overseer serve                 run the daemon and dashboard
   overseer submit <tasks.yaml>   queue a batch of tasks
   overseer status                list tasks and their progress
+  overseer repos                 list repositories, what they cost, and their backlogs
+  overseer backlog [repo]        list what is worth doing, per repository
   overseer logs <task-id>        print a task's transcripts
 
 Flags:
@@ -67,6 +69,10 @@ func run(args []string) error {
 		return cmdSubmit(cfg, fs.Arg(0))
 	case "status":
 		return cmdStatus(cfg)
+	case "repos":
+		return cmdRepos(cfg)
+	case "backlog":
+		return cmdBacklog(cfg, fs.Arg(0))
 	case "logs":
 		return cmdLogs(cfg, fs.Arg(0))
 	default:

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -61,6 +62,13 @@ func Open(dbPath string) (*Store, error) {
 // of these added by hand.
 var addedColumns = []struct{ table, column, decl string }{
 	{"tasks", "cost_cap_usd", "REAL NOT NULL DEFAULT 0"},
+	{"tasks", "repo_id", "INTEGER NOT NULL DEFAULT 0"},
+	{"proposals", "repo_id", "INTEGER NOT NULL DEFAULT 0"},
+	// Which provider served a run, so subscription-covered usage and usage
+	// metered against an endpoint the operator configured can be told apart
+	// after the fact rather than added into one misleading figure.
+	{"steps", "provider", "TEXT NOT NULL DEFAULT ''"},
+	{"proposals", "provider", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrate brings an existing database up to the current schema. It is
@@ -79,6 +87,92 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("migrate %s.%s: %w", c.table, c.column, err)
 		}
+	}
+	return backfillRepos(db)
+}
+
+// backfillRepos gives every pre-existing task and analysis a repository.
+//
+// Before repos were an entity a repository was a loose path repeated on every
+// row. This creates one repo per distinct path and links the rows to it, so a
+// database written by an older build arrives with its history already
+// attributed rather than showing an empty repo list beside years of work.
+//
+// It is idempotent: the work is skipped entirely once nothing is unlinked.
+func backfillRepos(db *sql.DB) error {
+	var pending int
+	err := db.QueryRow(`
+		SELECT (SELECT COUNT(*) FROM tasks WHERE repo_id = 0 AND repo_path <> '')
+		     + (SELECT COUNT(*) FROM proposals WHERE repo_id = 0 AND repo_path <> '')`).
+		Scan(&pending)
+	if err != nil {
+		return fmt.Errorf("count unlinked rows: %w", err)
+	}
+	if pending == 0 {
+		return nil
+	}
+
+	rows, err := db.Query(`
+		SELECT DISTINCT repo_path FROM (
+			SELECT repo_path FROM tasks     WHERE repo_id = 0 AND repo_path <> ''
+			UNION
+			SELECT repo_path FROM proposals WHERE repo_id = 0 AND repo_path <> ''
+		) ORDER BY repo_path`)
+	if err != nil {
+		return fmt.Errorf("list unlinked paths: %w", err)
+	}
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan unlinked path: %w", err)
+		}
+		paths = append(paths, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin backfill: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(rfc3339)
+	for _, path := range paths {
+		var id int64
+		err := tx.QueryRow(`SELECT id FROM repos WHERE path = ?`, path).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			slug, err := freeSlug(tx, slugForPath(path))
+			if err != nil {
+				return err
+			}
+			res, err := tx.Exec(`
+				INSERT INTO repos (slug, path, created_at, updated_at)
+				VALUES (?,?,?,?)`, slug, path, now, now)
+			if err != nil {
+				return fmt.Errorf("backfill repo %s: %w", path, err)
+			}
+			if id, err = res.LastInsertId(); err != nil {
+				return fmt.Errorf("backfill repo id: %w", err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("look up repo %s: %w", path, err)
+		}
+
+		for _, table := range []string{"tasks", "proposals"} {
+			_, err := tx.Exec(fmt.Sprintf(
+				`UPDATE %s SET repo_id = ? WHERE repo_id = 0 AND repo_path = ?`, table), id, path)
+			if err != nil {
+				return fmt.Errorf("link %s to repo %s: %w", table, path, err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit backfill: %w", err)
 	}
 	return nil
 }

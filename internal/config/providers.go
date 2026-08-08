@@ -148,6 +148,29 @@ func (p Provider) KeyPresent() bool {
 	return p.KeyEnv == "" || os.Getenv(p.KeyEnv) != ""
 }
 
+// Metered reports whether usage against this provider is real money to the
+// operator.
+//
+// The default claude and codex providers run against the operator's own
+// subscription through the CLI's stored login: what those CLIs report as
+// total_cost_usd is what the usage *would* have cost through the API — a usage
+// signal, not a bill. A provider is only metered once the operator has pointed
+// it at an endpoint of their own, which is what base_url means: bring your own
+// model, on your own account.
+func (p Provider) Metered() bool { return p.BaseURL != "" }
+
+// MeteredProviders names the providers whose usage is billed to the operator,
+// for the accounting split.
+func (c Config) MeteredProviders() map[string]bool {
+	out := map[string]bool{}
+	for name, p := range c.Providers {
+		if p.Metered() {
+			out[name] = true
+		}
+	}
+	return out
+}
+
 // Endpoint describes where a provider points, for display.
 func (p Provider) Endpoint() string {
 	if p.BaseURL == "" {

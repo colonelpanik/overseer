@@ -55,6 +55,24 @@ var severityRank = map[Severity]int{
 	SevNit: 1, SevMinor: 2, SevMajor: 3, SevCritical: 4,
 }
 
+// ValidSeverity reports whether s is one a finding may carry.
+//
+// This is a different vocabulary from config.ValidSeverities, which lists the
+// *thresholds* a task can be set to and therefore includes "any" — a threshold
+// meaning "block on everything", never something a finding is. Conversely a
+// finding may be a "nit", which is not a threshold. Anything ranking a finding
+// has to validate against this list, or the most common review finding there
+// is would be rejected.
+func ValidSeverity(s string) bool {
+	_, ok := severityRank[Severity(s)]
+	return ok
+}
+
+// SeverityNames is every finding severity, least important first.
+var SeverityNames = []string{
+	string(SevNit), string(SevMinor), string(SevMajor), string(SevCritical),
+}
+
 // thresholdRank maps a configured threshold to the minimum finding rank that
 // blocks convergence. "any" admits everything, including nits.
 var thresholdRank = map[string]int{

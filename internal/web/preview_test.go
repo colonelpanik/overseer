@@ -47,7 +47,11 @@ func TestWritePreview(t *testing.T) {
 		"wizard-failed.html": "/?wizard=4",
 		"settings.html":      "/?overlay=settings",
 		"analyses.html":      "/?overlay=analyses",
+		"repos.html":         "/?overlay=repos",
+		"backlog.html":       "/?overlay=backlog",
+		"repo-filtered.html": "/?repo=1",
 	}
+	seedPreviewBacklog(t, st)
 	for name, path := range pages {
 		rec := httptest.NewRecorder()
 		s.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -154,8 +158,18 @@ func seedPreview(t *testing.T, st *store.Store) {
 
 	for _, f := range fixtures {
 		verify := f.verify
+		// The fixtures create tasks directly rather than through Submit, so the
+		// repositories have to be registered here for the same reason Submit
+		// registers them: everything attributes to one.
+		repo, err := st.UpsertRepo(ctx, store.Repo{
+			Path:     f.repo,
+			Detected: "Go · go test ./... · default branch main",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		task, err := st.CreateTask(ctx, store.Task{
-			Slug: f.slug, RepoPath: f.repo, Goal: f.goal, State: f.state,
+			Slug: f.slug, RepoID: repo.ID, RepoPath: f.repo, Goal: f.goal, State: f.state,
 			Phase: f.phase, Iteration: f.iter, MaxIterations: 10,
 			BlockingSeverity: "any", Branch: f.branch, PRURL: f.pr,
 			ErrMsg: f.err, VerifyCommand: verify, CostCapUSD: f.cap,
@@ -175,6 +189,7 @@ func seedPreview(t *testing.T, st *store.Store) {
 
 			claude, err := st.StartStep(ctx, store.Step{
 				TaskID: task.ID, Phase: phase, Iteration: iter, Agent: "claude",
+				Provider: "anthropic",
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -191,6 +206,7 @@ func seedPreview(t *testing.T, st *store.Store) {
 			}
 			review, err := st.StartStep(ctx, store.Step{
 				TaskID: task.ID, Phase: phase, Iteration: iter, Agent: agent,
+				Provider: "openai",
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -238,6 +254,36 @@ func seedPreview(t *testing.T, st *store.Store) {
 	if err := st.SetTaskDeps(ctx, 4, []int64{3, 5}); err != nil {
 		t.Fatal(err)
 	}
+	// Give the steps plausible durations. They are created and closed in the
+	// same microsecond here, which would render every repository's agent time
+	// as "0s" — the one number on the Repos overlay that is always true.
+	rows, err := st.DB().QueryContext(ctx, `SELECT id FROM steps WHERE ended_at <> ''`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stepIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		stepIDs = append(stepIDs, id)
+	}
+	rows.Close()
+	for i, id := range stepIDs {
+		// Claude turns are the long ones; reviews come back quickly.
+		d := 95 * time.Second
+		if i%2 == 1 {
+			d = 22 * time.Second
+		}
+		start := time.Now().Add(-time.Duration(len(stepIDs)-i) * 3 * time.Minute)
+		if _, err := st.DB().ExecContext(ctx,
+			`UPDATE steps SET started_at=?, ended_at=? WHERE id=?`,
+			start.Format(time.RFC3339Nano), start.Add(d).Format(time.RFC3339Nano), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Age the tasks so the elapsed column is not all "<1s".
 	for id := int64(1); id <= 6; id++ {
 		task, err := st.GetTask(ctx, id)
@@ -386,4 +432,88 @@ func writeLiveTranscript(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	fmt.Fprintln(os.Stderr, "live transcript at", path)
+}
+
+// seedPreviewBacklog fills one repository's todo list from all three sources,
+// so the panel can be looked at with the recurrence counts and the provenance
+// lines it is actually meant to show.
+func seedPreviewBacklog(t *testing.T, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	repo, err := st.RepoByPath(ctx, "/home/kal/code/dc-planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []store.BacklogItem{
+		{
+			Source: store.BacklogReview, Severity: "nit", OriginTaskID: 1,
+			Title:    "Comment says rows, means records.",
+			Evidence: []string{"internal/csvutil/stream.go:13"},
+		},
+		{
+			Source: store.BacklogReview, Severity: "minor", OriginTaskID: 1,
+			Title:    "Header row capitalisation differs from the table header.",
+			Evidence: []string{"internal/web/export.go:78"},
+		},
+		{
+			Source: store.BacklogReview, Severity: "major", OriginTaskID: 2,
+			Title:    "The outbound HTTP client has no timeout.",
+			Detail:   "A hung upstream would hold a worker for as long as it stays hung.",
+			Evidence: []string{"internal/fetch/client.go:18", "internal/fetch/client.go:44"},
+		},
+		{
+			Source: store.BacklogAnalysis, Severity: "minor",
+			Title:    "Validate config.yaml at startup rather than on first use.",
+			Detail:   "config is unmarshalled unchecked, so a typo surfaces as a nil field mid-run.",
+			Evidence: []string{"internal/config/config.go:97"},
+		},
+		{
+			Source: store.BacklogAnalysis, Severity: "nit",
+			Title: "Drop the duplicated severity table in internal/agent.",
+		},
+		{
+			Source: store.BacklogManual,
+			Title:  "Work out why the rack view redraws twice on filter change.",
+		},
+	}
+	for _, item := range items {
+		item.RepoID = repo.ID
+		if _, err := st.AddBacklogItem(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// One item raised three times, which is what the recurrence count is for,
+	// and one already dismissed, which stays on the record.
+	for i := 0; i < 2; i++ {
+		if _, err := st.AddBacklogItem(ctx, store.BacklogItem{
+			RepoID: repo.ID, Source: store.BacklogReview, Severity: "nit",
+			Title: "Comment says rows, means records.", OriginTaskID: int64(3 + i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := st.ListBacklog(ctx, repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list {
+		if item.Source != store.BacklogAnalysis || item.Severity != "nit" {
+			continue
+		}
+		item.State = store.BacklogDismissed
+		if err := st.SaveBacklogItem(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Repository defaults, so the Repos overlay shows an inheriting repo and a
+	// configured one side by side.
+	repo.VerifyCommand = "go test ./..."
+	repo.BlockingSeverity = "major"
+	repo.CostCapUSD = 8
+	if err := st.SaveRepo(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
 }

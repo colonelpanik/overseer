@@ -12,8 +12,12 @@ import (
 // Task is one unit of work: a goal against a repository, driven through the
 // plan and execute loops.
 type Task struct {
-	ID               int64
-	Slug             string
+	ID   int64
+	Slug string
+	// RepoID links the task to its registered repository. RepoPath stays
+	// alongside it as the resolved path, so every existing reader keeps
+	// working and the migration is additive.
+	RepoID           int64
 	RepoPath         string
 	Goal             string
 	Constraints      string
@@ -64,13 +68,13 @@ func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
 	}
 
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (slug, repo_path, goal, constraints, state, phase,
+		INSERT INTO tasks (slug, repo_id, repo_path, goal, constraints, state, phase,
 			iteration, max_iterations, blocking_severity, plan_session_id,
 			exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
 			worktree_dir, pr_url, err_msg, verify_command,
 			finding_hashes, cost_cap_usd, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.Slug, t.RepoPath, t.Goal, t.Constraints, t.State, t.Phase,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.Slug, t.RepoID, t.RepoPath, t.Goal, t.Constraints, t.State, t.Phase,
 		t.Iteration, t.MaxIterations, t.BlockingSeverity, t.PlanSessionID,
 		t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir, t.GitAdminDir,
 		t.WorktreeDir, t.PRURL, t.ErrMsg, t.VerifyCommand,
@@ -87,7 +91,7 @@ func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
 	return t, nil
 }
 
-const taskColumns = `id, slug, repo_path, goal, constraints, state, phase,
+const taskColumns = `id, slug, repo_id, repo_path, goal, constraints, state, phase,
 	iteration, max_iterations, blocking_severity, plan_session_id,
 	exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
 	worktree_dir, pr_url, err_msg, verify_command, finding_hashes,
@@ -96,7 +100,7 @@ const taskColumns = `id, slug, repo_path, goal, constraints, state, phase,
 func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
 	var t Task
 	var hashes, created, updated string
-	err := sc.Scan(&t.ID, &t.Slug, &t.RepoPath, &t.Goal, &t.Constraints,
+	err := sc.Scan(&t.ID, &t.Slug, &t.RepoID, &t.RepoPath, &t.Goal, &t.Constraints,
 		&t.State, &t.Phase, &t.Iteration, &t.MaxIterations,
 		&t.BlockingSeverity, &t.PlanSessionID, &t.ExecSessionID, &t.Branch,
 		&t.BaseRef, &t.GitCommonDir, &t.GitAdminDir,

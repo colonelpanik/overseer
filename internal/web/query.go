@@ -16,7 +16,10 @@ import (
 // a minute; and a URL that carries the view means a link to "the escalated
 // task with its fingerprint open" is just a link.
 type Query struct {
-	Sel    int64
+	Sel int64
+	// Repo narrows the board to one repository, and names which repository the
+	// backlog panel is showing. Zero is every repository.
+	Repo   int64
 	Filter string
 	Search string
 	Group  bool
@@ -79,6 +82,9 @@ func ParseQuery(r *http.Request) Query {
 	if s := v.Get("wizard"); s != "" {
 		q.Wizard, _ = strconv.ParseInt(s, 10, 64)
 	}
+	if s := v.Get("repo"); s != "" {
+		q.Repo, _ = strconv.ParseInt(s, 10, 64)
+	}
 	switch f := v.Get("filter"); f {
 	case FilterAttention, FilterRunning, FilterDone, FilterAll:
 		q.Filter = f
@@ -96,7 +102,7 @@ func ParseQuery(r *http.Request) Query {
 		}
 	}
 	switch q.Overlay {
-	case "cli", "add", "settings", "analyses":
+	case "cli", "add", "settings", "analyses", "repos", "backlog":
 	default:
 		q.Overlay = ""
 	}
@@ -153,6 +159,9 @@ func (q Query) URL(pairs ...any) string {
 	if q.Wizard != 0 {
 		v.Set("wizard", strconv.FormatInt(q.Wizard, 10))
 	}
+	if q.Repo != 0 {
+		v.Set("repo", strconv.FormatInt(q.Repo, 10))
+	}
 	if q.Saved {
 		v.Set("saved", "1")
 	}
@@ -193,6 +202,11 @@ func (q *Query) set(key string, val any) {
 		q.Step, q.StepSet = int(toInt64(val)), true
 	case "overlay":
 		q.Overlay, _ = val.(string)
+	case "repo":
+		q.Repo = toInt64(val)
+		// A task selected in one repository means nothing while looking at
+		// another, and its step and file indices mean less.
+		q.Sel, q.Step, q.StepSet, q.File = 0, -1, false, ""
 	case "wizard":
 		q.Wizard = toInt64(val)
 		// The wizard and the queue dialog are both full-screen; opening one

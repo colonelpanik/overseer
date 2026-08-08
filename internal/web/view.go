@@ -259,7 +259,10 @@ type Template struct {
 
 // AddForm is the queue-a-task dialog.
 type AddForm struct {
-	Repos      []string
+	// Repos are the registered repositories, offered as a dropdown. A path not
+	// listed yet is still accepted — registration is a side effect of use, not
+	// a gate in front of it.
+	Repos      []RepoChoice
 	Deps       []DepChoice
 	Severities []string
 	Severity   string
@@ -376,9 +379,15 @@ type Dashboard struct {
 
 	RunSummary  string
 	SandboxNote string
-	Spend       string
-	RunCap      string
-	OverRunCap  bool
+	// Spend is subscription-covered CLI usage — a usage signal, not a bill.
+	// Metered is usage against an endpoint the operator configured, which is
+	// real money. They are shown separately and never added.
+	Spend      string
+	Metered    string
+	HasMetered bool
+	RunCap     string
+	OverRunCap bool
+
 	PauseReason string
 
 	Budget *BudgetAlert
@@ -403,6 +412,14 @@ type Dashboard struct {
 	Running    *RunningAnalysis
 	Analyses   []AnalysisRow
 	ShowingAll bool
+
+	// Repos and Backlog are the two repository surfaces. RepoChip shows the
+	// active filter, and OpenBacklog is how many items are waiting across
+	// every repository.
+	Repos       *ReposView
+	Backlog     *BacklogView
+	RepoChip    *RepoChip
+	OpenBacklog int
 }
 
 // RunningAnalysis is the nav chip pointing at an in-flight or unreviewed
@@ -524,10 +541,14 @@ func buildWizard(p store.Proposal, rows []store.ProposalTask, live *LivePane, q 
 
 // taskFacts is everything the board needs about one task, gathered once.
 type taskFacts struct {
-	Task    store.Task
-	Totals  store.Totals
-	Rounds  []round
-	Blocked bool
+	Task   store.Task
+	Totals store.Totals
+	Rounds []round
+	// RepoSlug names the registered repository, which is what the board groups
+	// by. Two repositories can sit in directories with the same basename, and
+	// grouping by that merged them under one heading.
+	RepoSlug string
+	Blocked  bool
 	// UnmetDeps are the dependencies that have not reached done.
 	UnmetDeps []store.Task
 }
@@ -582,7 +603,10 @@ func buildRows(facts []taskFacts, q Query) []Row {
 	var order []string
 	byRepo := map[string][]taskFacts{}
 	for _, f := range facts {
-		name := repoName(f.Task.RepoPath)
+		name := f.RepoSlug
+		if name == "" {
+			name = repoName(f.Task.RepoPath)
+		}
 		if _, ok := byRepo[name]; !ok {
 			order = append(order, name)
 		}
