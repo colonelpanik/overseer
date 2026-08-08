@@ -217,40 +217,158 @@ func (e *Engine) ContinueEscalated(ctx context.Context, taskID int64, extra int)
 	return nil
 }
 
-// Abandon marks a task failed on purpose, keeping its branch and worktree.
+// Abandon ends a task on purpose, keeping its branch and worktree.
 //
-// It refuses a task a worker goroutine currently owns. Without this guard,
-// Abandon would write "failed" here, but the owning worker holds its own
-// now-stale in-memory copy of the task from before this call, and its very
-// next SaveTask — at the end of whatever action it is mid-dispatch on —
-// overwrites this with whatever state its own loop.Next computed, silently
-// reverting the abandon a moment later. Failing loudly is strictly better
-// than that: the operator sees the abandon did not take effect, rather than
-// watching a task that looked stopped quietly resume on its own.
+// It reaches a running task now: the request is lodged with the worker driving
+// it, which applies it from the copy it is actually holding. This used to
+// refuse outright, because a write from here would be overwritten by that
+// worker's next SaveTask — an honest failure, but still a task the operator
+// could not stop.
 //
-// This does not make it possible to stop a task that is actually running:
-// the worker keeps going until its current action returns, however long that
-// takes. Doing that needs a cooperative cancellation signal the worker checks
-// between dispatches, which this guard does not add — it only turns a silent
-// failure into an honest one.
-func (e *Engine) Abandon(ctx context.Context, taskID int64) error {
-	if e.isRunning(taskID) {
-		return fmt.Errorf("task %d is currently running; cannot abandon it while a worker is driving it", taskID)
-	}
+// The task lands in "abandoned", not "failed". Failed means the machinery or
+// the agent failed; an operator's decision reading the same way makes the
+// board's one urgent signal mean two different things.
+func (e *Engine) Abandon(ctx context.Context, taskID int64, opts StopOpts) error {
+	return e.applyStop(ctx, taskID, stopRequest{
+		Kind: StopAbandon,
+		Msg:  reasonOr(opts.Reason, "abandoned by the operator"),
+		Hard: opts.Now,
+	})
+}
 
+// StopOpts is how far a stop goes.
+type StopOpts struct {
+	// Now kills the agent mid-turn instead of letting the current step finish.
+	//
+	// The default is to wait, because a turn seconds from finishing is worth
+	// far more than the wait: stopping at the boundary costs nothing and leaves
+	// nothing half-written. Now is for a step that is wedged, where waiting out
+	// the step timeout is the thing being avoided.
+	Now bool
+	// Reason is recorded on the interrupted step, and on the task for an
+	// abandon. Empty takes a sensible default.
+	Reason string
+}
+
+// Stop parks a task where it is. Starting it again re-dispatches the action its
+// state names, so nothing is lost and nothing is repeated from the beginning.
+func (e *Engine) Stop(ctx context.Context, taskID int64, opts StopOpts) error {
 	task, err := e.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	task.State = string(loop.StateFailed)
-	if task.ErrMsg == "" {
-		task.ErrMsg = "abandoned by the operator"
+	if loop.IsTerminal(task.State) {
+		return fmt.Errorf("task %d is %s; there is nothing to stop", taskID, task.State)
 	}
-	if err := e.Store.SaveTask(ctx, task); err != nil {
+	if task.Stopped() {
+		// Not an error: pressing Stop on a stopped task is how an operator
+		// escalates to Stop now, and refusing would make the escalation
+		// impossible.
+		if !opts.Now {
+			return nil
+		}
+	}
+
+	// Persisted first, so a daemon that dies in the window leaves the task
+	// parked rather than running. The request that follows lives only in
+	// memory, deliberately: a "please stop" flag nobody can see, applied by a
+	// restarted daemon minutes later out of nowhere, is worse than a request
+	// that evaporates with the process that was going to honour it.
+	if err := e.Store.StopTask(ctx, taskID, true); err != nil {
+		return err
+	}
+	e.notify(taskID)
+
+	// applyStop lodges this with the worker driving the task, or — when nobody
+	// is — does nothing beyond the notify, which is right: the row is already
+	// written and the scheduler will not pick the task up again.
+	return e.applyStop(ctx, taskID, stopRequest{
+		Kind: StopPark,
+		Msg:  reasonOr(opts.Reason, "stopped by the operator"),
+		Hard: opts.Now,
+	})
+}
+
+// Start clears a stop. The next poll claims the task and loop.Pending
+// re-dispatches the action its state names — the same path a restarted daemon
+// takes, which is why stopping is a column rather than a state.
+func (e *Engine) Start(ctx context.Context, taskID int64) error {
+	task, err := e.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if !task.Stopped() {
+		return nil
+	}
+	if loop.IsTerminal(task.State) {
+		return fmt.Errorf("task %d is %s; restart it rather than starting it", taskID, task.State)
+	}
+	if err := e.Store.StopTask(ctx, taskID, false); err != nil {
 		return err
 	}
 	e.notify(taskID)
 	return nil
+}
+
+// RestartOpts amends a task on its way into a fresh attempt.
+type RestartOpts struct {
+	StopOpts
+	// Goal and Constraints replace the task's own when non-empty. "Restart it,
+	// but this time do not touch the schema" is the usual reason to restart at
+	// all, and making the operator edit the task separately loses that.
+	Goal        string
+	Constraints []string
+}
+
+// Restart runs a task again from the top, on its own branch.
+//
+// The previous attempt is kept: its branch and worktree stay exactly as they
+// are, and the new attempt works on <slug>-r<n>. That costs disk, and buys the
+// ability to compare against the attempt you are restarting — which is usually
+// why you are restarting it.
+func (e *Engine) Restart(ctx context.Context, taskID int64, opts RestartOpts) error {
+	task, err := e.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	// A task with a pull request cannot be restarted safely in either
+	// direction. Keeping the URL makes finish short-circuit, so the new attempt
+	// would skip to worktree removal and be marked done having done nothing;
+	// clearing it silently force-pushes over an open pull request's branch,
+	// because the opener returns the existing one rather than creating a
+	// duplicate.
+	if task.PRURL != "" {
+		return fmt.Errorf("task %d already opened %s; restarting it would rewrite that pull request's branch",
+			taskID, task.PRURL)
+	}
+
+	next := task
+	next.State = string(loop.StateQueued)
+	next.Phase = ""
+	next.Iteration = 0
+	// Back to the configured budget, not whatever Continue accumulated: a task
+	// restarted after three Continues should not begin with a budget of forty.
+	next.MaxIterations = e.Cfg.MaxIterations
+	if strings.TrimSpace(opts.Goal) != "" {
+		next.Goal = strings.TrimSpace(opts.Goal)
+	}
+	if len(opts.Constraints) > 0 {
+		next.Constraints = strings.Join(opts.Constraints, "\n")
+	}
+
+	return e.applyStop(ctx, taskID, stopRequest{
+		Kind:    StopRestart,
+		Msg:     reasonOr(opts.Reason, "restarted by the operator"),
+		Hard:    opts.Now,
+		Restart: next,
+	})
+}
+
+func reasonOr(reason, fallback string) string {
+	if strings.TrimSpace(reason) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(reason)
 }
 
 // RaiseCap sets a task's advisory spend ceiling. The dashboard offers this

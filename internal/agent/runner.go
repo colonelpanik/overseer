@@ -30,6 +30,17 @@ type Result struct {
 	// Retryable is true when ErrMsg describes a transient condition. The
 	// engine retries these without spending an iteration.
 	Retryable bool
+	// Canceled is true when the run ended because the caller's context was
+	// cancelled — the operator stopped the task, or the daemon is shutting
+	// down — rather than because the agent failed or the step hit its own
+	// timeout.
+	//
+	// All three end in the same SIGKILLed process group, and ErrMsg carries
+	// whatever the agent happened to print just before it died, so the message
+	// alone cannot say which happened. Without this the engine cannot tell a
+	// deliberate stop from a failure, and would mark a task permanently failed
+	// for having been stopped on purpose.
+	Canceled bool
 }
 
 // RunSpec is one invocation's parameters.
@@ -205,7 +216,18 @@ func (r *Runner) Run(ctx context.Context, spec RunSpec) (Result, error) {
 		res.ErrMsg = fmt.Sprintf("%s: %v: %s", r.Bin, waitErr,
 			truncate(strings.TrimSpace(stderr.String()), 500))
 	}
-	res.Retryable = res.ErrMsg != "" && IsRetryable(res.ErrMsg)
+	// The parent context, not runCtx: runCtx reports DeadlineExceeded for a
+	// step timeout and Canceled for a stop, but a stop landing after the
+	// deadline had already fired would still read DeadlineExceeded. ctx says
+	// unambiguously whether the caller pulled the plug.
+	res.Canceled = ctx.Err() != nil
+
+	// A cancelled run is never retryable, whatever its message says. The
+	// message is whatever the agent printed as it died, which can easily
+	// contain one of the retryable markers — "timeout" among them — and
+	// retrying would restart an agent the operator just stopped, three times
+	// over, each attempt running to its own step timeout.
+	res.Retryable = res.ErrMsg != "" && !res.Canceled && IsRetryable(res.ErrMsg)
 	return res, nil
 }
 

@@ -254,7 +254,10 @@ func TestSelectStillWorksWhateverNestingAllows(t *testing.T) {
 	if w.Name() != "bwrap" {
 		t.Errorf("Name = %q, want bwrap", w.Name())
 	}
-	if ProbeNested("bwrap") != nil && !strings.Contains(note, "nested") {
-		t.Errorf("note = %q, want it to mention that nested sandboxes are refused", note)
+	// When nesting is refused, the note has to say what overseer did about it —
+	// that the agents' own sandbox is off — because that is the part an
+	// operator needs to know. "nesting refused" alone reads like a fault.
+	if ProbeNested("bwrap") != nil && !strings.Contains(note, "agents' own sandbox off") {
+		t.Errorf("note = %q, want it to say the agents' own sandbox is off", note)
 	}
 }

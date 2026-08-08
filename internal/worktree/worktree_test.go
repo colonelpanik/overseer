@@ -404,3 +404,27 @@ func TestRemoveDeletesWorktreeButKeepsBranch(t *testing.T) {
 		t.Error("Remove deleted the branch; the branch must always survive")
 	}
 }
+
+// A Worktree with no Dir must never reach git, because exec would run it in
+// the daemon's own working directory — and `add -A` plus `commit` there means
+// overseer committing its own source tree, authored by overseer, swallowing
+// whatever the operator had staged.
+//
+// This is not hypothetical: it happened, from a task moved into a mid-flight
+// state without its worktree paths ever being populated.
+func TestGitRefusesAnEmptyDirectory(t *testing.T) {
+	ctx := context.Background()
+	m := NewManager(t.TempDir())
+
+	_, err := m.Commit(ctx, Worktree{}, "overseer: should never happen")
+	if err == nil {
+		t.Fatal("Commit with no worktree directory succeeded; it would have committed the daemon's cwd")
+	}
+	if !strings.Contains(err.Error(), "no repository directory") {
+		t.Errorf("err = %v, want it to name the missing directory", err)
+	}
+
+	if _, err := m.Diff(ctx, Worktree{BaseRef: "main"}); err == nil {
+		t.Error("Diff with no worktree directory succeeded")
+	}
+}

@@ -182,7 +182,9 @@ func nestedNote(bin string) string {
 	if ProbeNested(bin) == nil {
 		return ""
 	}
-	return " (nested sandboxes refused by this kernel; the agents' own is off and overseer's is doing the confining)"
+	// Short, because this sits in the nav and is repeated as a chip on every
+	// task. The long version belongs in the README, not on every page.
+	return " · agents' own sandbox off (nesting refused)"
 }
 
 // BinMounts returns the read-only mounts needed to make bin executable inside

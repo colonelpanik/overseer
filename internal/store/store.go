@@ -69,6 +69,11 @@ var addedColumns = []struct{ table, column, decl string }{
 	// after the fact rather than added into one misleading figure.
 	{"steps", "provider", "TEXT NOT NULL DEFAULT ''"},
 	{"proposals", "provider", "TEXT NOT NULL DEFAULT ''"},
+	// When the operator stopped a task. Not a state: see schema.sql.
+	{"tasks", "stopped_at", "TEXT NOT NULL DEFAULT ''"},
+	// Which attempt a task, and each of its steps, belongs to.
+	{"tasks", "run_seq", "INTEGER NOT NULL DEFAULT 1"},
+	{"steps", "run_seq", "INTEGER NOT NULL DEFAULT 1"},
 }
 
 // migrate brings an existing database up to the current schema. It is

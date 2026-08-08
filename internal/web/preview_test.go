@@ -50,7 +50,10 @@ func TestWritePreview(t *testing.T) {
 		"repos.html":         "/?overlay=repos",
 		"backlog.html":       "/?overlay=backlog",
 		"repo-filtered.html": "/?repo=1",
+		"plan.html":          "/?sel=1&tab=plan",
+		"stopped.html":       "/?sel=6&tab=plan",
 	}
+	seedPreviewStopped(t, st)
 	seedPreviewBacklog(t, st)
 	for name, path := range pages {
 		rec := httptest.NewRecorder()
@@ -517,3 +520,52 @@ func seedPreviewBacklog(t *testing.T, st *store.Store) {
 		t.Fatal(err)
 	}
 }
+
+// seedPreviewStopped parks one task and gives two of them a plan on disk, so
+// the plan tab can be looked at in both its states — read-only while the task
+// runs, and editable once it is stopped.
+func seedPreviewStopped(t *testing.T, st *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	for _, id := range []int64{1, 6} {
+		task, err := st.GetTask(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "PLAN.md"), []byte(samplePlan), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		task.WorktreeDir = dir
+		if err := st.SaveTask(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.StopTask(ctx, 6, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const samplePlan = `# Add full jitter to the collector retry schedule
+
+## Approach
+
+The collector currently sleeps ` + "`base * 2^n`" + ` with no randomisation, so every
+collector that started together retries together — the thundering herd the
+backoff was meant to avoid in the first place.
+
+Replace it with full jitter: ` + "`rand.Int63n(base * 2^n)`" + `, capped at the existing
+ceiling.
+
+## Files
+
+- ` + "`internal/collect/retry.go`" + ` — the schedule itself, and its cap.
+- ` + "`internal/collect/retry_test.go`" + ` — a distribution test over 10k draws.
+
+## Tests
+
+The existing test asserts an exact sleep, which full jitter makes meaningless.
+It is replaced by one asserting the draw stays inside [0, ceiling) and that the
+mean lands near half the ceiling over enough samples.
+`

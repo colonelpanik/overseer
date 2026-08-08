@@ -29,8 +29,36 @@ const (
 	StateFinishing  State = "finishing"
 	StateDone       State = "done"
 	StateEscalated  State = "escalated"
-	StateFailed     State = "failed"
+	// StateFailed means the machinery or the agent failed. It is deliberately
+	// not where an operator's decision lands: a task somebody stopped or
+	// abandoned reading as "failed" makes the board's one urgent signal mean
+	// two different things.
+	StateFailed State = "failed"
+	// StateAbandoned is an operator saying this task is over. Terminal, and
+	// distinct from failed for the reason above.
+	StateAbandoned State = "abandoned"
 )
+
+// TerminalStates are the states a worker will never advance.
+//
+// This is the one definition. It used to be stated twice — here and as string
+// literals in the store's claimable-tasks query — and once more as a
+// hand-written predicate in the web layer, so adding a state meant finding
+// three places and the compiler helped with none of them.
+var TerminalStates = []State{StateDone, StateFailed, StateEscalated, StateAbandoned}
+
+// TerminalStateNames is TerminalStates as plain strings, for the store and the
+// web layer, which hold a task's state as a string rather than a loop.State.
+func TerminalStateNames() []string {
+	out := make([]string, len(TerminalStates))
+	for i, s := range TerminalStates {
+		out[i] = string(s)
+	}
+	return out
+}
+
+// IsTerminal reports whether a state is one a worker will never advance.
+func IsTerminal(state string) bool { return isTerminal(State(state)) }
 
 // Phase is which of the two loops a task is in. The iteration counter is
 // per phase.
@@ -298,7 +326,12 @@ func GrantMoreIterations(t Task, n int) Task {
 }
 
 func isTerminal(s State) bool {
-	return s == StateDone || s == StateFailed || s == StateEscalated
+	for _, t := range TerminalStates {
+		if s == t {
+			return true
+		}
+	}
+	return false
 }
 
 // Pending returns the action a mid-flight task is waiting on, and whether

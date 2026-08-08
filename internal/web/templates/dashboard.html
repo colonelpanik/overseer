@@ -52,14 +52,36 @@
     <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardNew}}">Analyse a repo</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "settings"}}">Models</a>
     <a class="btn btn-primary" href="{{.Q.URL "overlay" "add"}}">Queue task</a>
+    {{if not .PauseReason}}
+    {{/* Soft: the scheduler stops claiming and anything mid-step parks at its
+         next boundary. "Stop everything now" additionally kills the agents,
+         and is deliberately the second press rather than the first. */}}
+    <form class="inline" method="post" action="/stopall">
+      <button class="btn btn-stopall" type="submit" title="stop claiming work; running tasks park at their next boundary">Stop all</button>
+    </form>
+    {{end}}
   </div>
 
   {{if .PauseReason}}
   <div class="banner-auth">
-    <span class="title">Run paused — authentication failure</span>
+    <span class="title">{{if .StoppedAll}}Run stopped{{else}}Run paused — authentication failure{{end}}</span>
     <span class="body">{{.PauseReason}} No task will dispatch until this clears. Tasks stopped at their step boundary and kept their state.</span>
     <span class="spacer"></span>
+    {{if .StoppedAll}}
+    {{/* Offered here rather than on the nav, because it is only reachable
+         while the run is already stopped — and it is the escalation, so it
+         should sit next to what it escalates. */}}
+    <form class="inline" method="post" action="/stopall">
+      <input type="hidden" name="now" value="1">
+      <button class="btn" type="submit">Kill the running agents</button>
+    </form>
+    <form class="inline" method="post" action="/stopall">
+      <input type="hidden" name="clear" value="1">
+      <button class="btn" type="submit">Start the run</button>
+    </form>
+    {{else}}
     <form class="inline" method="post" action="/resume"><button class="btn" type="submit">Resume run</button></form>
+    {{end}}
   </div>
   {{end}}
 
@@ -401,6 +423,33 @@
                 {{end}}
               {{end}}
             </div>
+
+          {{else if eq .Tab "plan"}}
+            {{with .Plan}}
+            {{/* The plan is read from the worktree, not the branch, because
+                 that is where every agent reads it from — so this is what the
+                 next turn will act on, not what was last committed. */}}
+            <div class="pane-scroll planpane">
+              {{if .Empty}}<div class="pane-note">{{.Empty}}</div>{{end}}
+              {{if .Editable}}
+              <form method="post" action="/task/{{$.Sel.ID}}/plan" class="planform">
+                <textarea class="input mono" name="plan" spellcheck="false"
+                          aria-label="The plan this task is working from">{{.Body}}</textarea>
+                <div class="planfoot">
+                  <span class="small">{{.Why}}</span>
+                  <span class="spacer"></span>
+                  <button class="btn btn-primary" type="submit">Save the plan</button>
+                </div>
+              </form>
+              {{else}}
+                {{if .Body}}<pre class="plantext">{{.Body}}</pre>{{end}}
+                <div class="planfoot">
+                  <span class="small">{{.Why}}</span>
+                </div>
+              {{end}}
+              {{if .Path}}<div class="small mono planpath">{{.Path}}</div>{{end}}
+            </div>
+            {{end}}
 
           {{else}}
             {{with .Live}}

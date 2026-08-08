@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS backlog (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_backlog_fingerprint ON backlog(repo_id, fingerprint);
 CREATE INDEX IF NOT EXISTS idx_backlog_repo ON backlog(repo_id, state);
 
+-- Daemon-level state that must survive a restart. Currently one key: the
+-- operator's global stop. The auth-failure pause is deliberately NOT stored
+-- here — it is a reaction to a condition that may have cleared, and a restart
+-- is exactly when it should be retried.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     slug              TEXT NOT NULL UNIQUE,
@@ -81,6 +91,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     err_msg           TEXT NOT NULL DEFAULT '',
     verify_command    TEXT NOT NULL DEFAULT '',
     finding_hashes    TEXT NOT NULL DEFAULT '',
+    -- When the operator stopped this task, or empty. Deliberately not a state:
+    -- the state column names the action that was in flight, which is what
+    -- loop.Pending re-dispatches on resume, so overwriting it would make a
+    -- stopped task unable to say where it had got to.
+    stopped_at        TEXT NOT NULL DEFAULT '',
+    -- Which attempt this is. A restart bumps it, and the worktree, branch,
+    -- transcripts and agent state are all keyed by it, so one attempt cannot
+    -- append to another's.
+    run_seq           INTEGER NOT NULL DEFAULT 1,
     -- Advisory spend ceiling. Exceeding it raises a banner on the dashboard
     -- and nothing else: killing a task mid-turn would abandon the worktree in
     -- a half-written state and waste everything already paid for. Zero means
@@ -113,6 +132,9 @@ CREATE TABLE IF NOT EXISTS steps (
     -- usage and usage metered against an endpoint the operator supplied can be
     -- told apart rather than added into one misleading figure.
     provider        TEXT NOT NULL DEFAULT '',
+    -- Which attempt of the task this step belongs to, so a restarted task's
+    -- history stays separable from the attempt before it.
+    run_seq         INTEGER NOT NULL DEFAULT 1,
     state           TEXT NOT NULL,
     started_at      TEXT NOT NULL,
     ended_at        TEXT NOT NULL DEFAULT '',

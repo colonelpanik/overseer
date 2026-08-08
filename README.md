@@ -24,6 +24,10 @@ Requires `claude`, `codex`, `git`, and `gh` on PATH.
     overseer status                     # same information as a table
     overseer repos                      # per-repository time, turns and usage
     overseer backlog                    # what each repository still has waiting
+    overseer stop 3                     # park a task; -now kills the agent
+    overseer start 3                    # put it back to work
+    overseer restart 3                  # run it again, on a fresh branch
+    overseer plan 3                     # the plan it is working from
     overseer logs 3                     # one task's steps, verdicts, findings
 
 Do not know what to put in the task list? Open the dashboard and press
@@ -190,6 +194,64 @@ The **analyse** role picks the model (see Models and providers above), and the
 wizard's own dropdown can override it for a single run. It is a separate knob
 from whatever runs the loop: the analysis reads once and writes nothing, so it
 is worth spending less on than the turns that produce the change.
+
+## Stopping, starting, restarting
+
+    overseer stop 3          # park it where it is
+    overseer stop 3 -now     # and kill the agent mid-turn
+    overseer start 3         # put it back to work
+    overseer restart 3       # run it again, on a fresh branch
+
+**Stop** parks a task. **Start** puts it back, and it resumes the action it was
+on rather than beginning again — the same mechanism that lets a task survive a
+daemon restart. A stopped task reads as `stopped` on the board and is never
+claimed, but underneath it keeps the state that says where it had got to.
+
+Stopping is **soft by default**: the current agent turn finishes, then the task
+parks at the boundary. That costs at most one turn and leaves nothing
+half-written. **Stop now** kills the agent instead, for a step that is wedged
+and would otherwise run to its 30-minute timeout.
+
+What a hard stop does with the half-finished turn: it commits it, as
+`overseer: interrupted during exec iteration 3` — never the normal message,
+which would claim an iteration completed. The tree is left clean, so the work
+is visible in the Diff tab and your own edits do not get swept into the next
+turn's commit alongside it.
+
+**Restart** runs a task again from the top, on `overseer/<slug>-r2` in its own
+worktree. The previous attempt is kept exactly as it was, so you can compare
+against the thing you are restarting — usually the reason you are. You can
+amend the goal and the constraints on the way through: *restart it, but this
+time do not touch the schema*. A task with a pull request is refused, because
+restarting it would either do nothing or force-push over the open branch.
+
+**Abandon** ends a task on purpose. It lands in `abandoned`, not `failed`:
+`failed` means the machinery or the agent failed, and an operator's decision
+reading the same way makes the board's one urgent signal mean two things.
+
+**Stop all** on the nav stops the scheduler claiming anything; running tasks
+park at their next boundary, and a second press kills their agents. It is
+persisted, so a restart does not quietly resume everything you just stopped.
+
+## Seeing and editing the plan
+
+The **Plan** tab shows `PLAN.md` as it is on disk. That is not a copy: the plan
+review, the implementation turn, the code review and the pull request body all
+read it from there, so what the tab shows is what the next turn will act on.
+
+**Stop a task and the plan becomes editable.** Save it and the next turn builds
+what you wrote. That is the loop worth knowing:
+
+    stop  →  read the plan  →  fix it  →  start
+
+Editing is offered only while stopped, and not as a policy: a write landing
+mid-turn races the agent editing the same tree, and would be folded into that
+turn's commit as if the agent had made it.
+
+Saving also clears the execution session, which is what makes the edit take
+effect. A resumed implementation turn is prompted with the review's findings
+and never re-reads `PLAN.md` — it runs on the session's memory of it — so
+without that, an edit would be ignored by exactly the turn it was written for.
 
 ## Repositories
 

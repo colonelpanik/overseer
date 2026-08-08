@@ -52,6 +52,9 @@ const (
 	TabDiff     = "diff"
 	TabFindings = "findings"
 	TabLive     = "live"
+	// TabPlan shows PLAN.md as it is on disk — which is what the next turn
+	// will act on, since every agent reads it from there.
+	TabPlan = "plan"
 )
 
 // Filter values for the task list.
@@ -93,7 +96,7 @@ func ParseQuery(r *http.Request) Query {
 		q.Group = v.Get("group") == "1"
 	}
 	switch t := v.Get("tab"); t {
-	case TabDiff, TabFindings, TabLive:
+	case TabDiff, TabFindings, TabLive, TabPlan:
 		q.Tab = t
 	}
 	if s := v.Get("step"); s != "" {
