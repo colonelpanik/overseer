@@ -204,9 +204,10 @@ blocking_severity: major
 			"openai":    {Kind: KindOpenAI, KeyEnv: "OPENAI_API_KEY"},
 		},
 		map[string]Role{
-			RoleCode:    {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
-			RoleReview:  {Agent: AgentCodex, Provider: "openai"},
-			RoleAnalyse: {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
+			RoleCode:      {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
+			RoleReview:    {Agent: AgentCodex, Provider: "openai"},
+			RoleAnalyse:   {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
+			RoleArchitect: {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
 		})
 	if err != nil {
 		t.Fatalf("SaveProvidersAndRoles: %v", err)
@@ -309,5 +310,29 @@ func TestOnlyABringYourOwnEndpointIsMetered(t *testing.T) {
 	}
 	if len(metered) != 1 {
 		t.Errorf("MeteredProviders = %v, want only the configured endpoint", metered)
+	}
+}
+
+// An operator's existing config file names three roles. Adding a fourth must
+// not make it unloadable.
+func TestAConfigWithoutTheArchitectRoleStillLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(`
+roles:
+  code:    {agent: claude, provider: anthropic}
+  review:  {agent: codex,  provider: openai}
+  analyse: {agent: claude, provider: anthropic, model: claude-sonnet-5}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("a config predating the architect role failed to load: %v", err)
+	}
+	if _, ok := c.Roles[RoleArchitect]; !ok {
+		t.Error("the architect role did not fall back to its default")
+	}
+	if c.Roles[RoleCode].Provider != "anthropic" {
+		t.Errorf("the file's own roles were lost: %+v", c.Roles)
 	}
 }

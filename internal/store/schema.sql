@@ -185,6 +185,18 @@ CREATE TABLE IF NOT EXISTS proposals (
     model           TEXT NOT NULL DEFAULT '',
     detected        TEXT NOT NULL DEFAULT '',
     provider        TEXT NOT NULL DEFAULT '',
+    -- analyse | create. What the wizard is doing: reading a repository that
+    -- exists, or designing and building one that does not. Every row written
+    -- before this column existed is an analyse.
+    kind            TEXT NOT NULL DEFAULT 'analyse',
+    -- The design the architect and the operator arrived at together. Held here
+    -- rather than written into the repository during the conversation: an
+    -- existing repository is mounted read-only for exactly the reason that
+    -- nothing should be left behind in a tree somebody only asked us to read.
+    design          TEXT NOT NULL DEFAULT '',
+    -- The agent session the conversation resumes into, so each turn continues
+    -- the last rather than starting over.
+    architect_session TEXT NOT NULL DEFAULT '',
     -- Accumulated across regenerates: a re-ask really did cost what the first
     -- attempt cost plus the second.
     cost_usd        REAL NOT NULL DEFAULT 0,
@@ -219,3 +231,25 @@ CREATE TABLE IF NOT EXISTS proposal_tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_proposal_tasks_proposal ON proposal_tasks(proposal_id, ord);
+
+-- One turn of the architect conversation: the operator thinking out loud with
+-- an agent before any task exists.
+--
+-- Not on `steps`, which is NOT NULL REFERENCES tasks(id) — this happens before
+-- there is a task, and is the thing that decides what the tasks are.
+CREATE TABLE IF NOT EXISTS architect_turns (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+    -- operator | architect
+    speaker     TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    -- Usage, on the architect's turns only. A conversation costs real turns and
+    -- the wizard should say so before the operator has had ten of them.
+    cost_usd      REAL NOT NULL DEFAULT 0,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    err_msg     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_architect_turns_proposal ON architect_turns(proposal_id, id);

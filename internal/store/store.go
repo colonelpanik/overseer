@@ -74,6 +74,10 @@ var addedColumns = []struct{ table, column, decl string }{
 	// Which attempt a task, and each of its steps, belongs to.
 	{"tasks", "run_seq", "INTEGER NOT NULL DEFAULT 1"},
 	{"steps", "run_seq", "INTEGER NOT NULL DEFAULT 1"},
+	// What the wizard is doing, and what the architect conversation produced.
+	{"proposals", "kind", "TEXT NOT NULL DEFAULT 'analyse'"},
+	{"proposals", "design", "TEXT NOT NULL DEFAULT ''"},
+	{"proposals", "architect_session", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrate brings an existing database up to the current schema. It is

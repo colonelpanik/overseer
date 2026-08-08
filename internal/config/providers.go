@@ -25,16 +25,22 @@ const (
 	RoleCode    = "code"
 	RoleReview  = "review"
 	RoleAnalyse = "analyse"
+	// RoleArchitect is the design conversation: the operator and an agent
+	// working out what to build before anything is queued. It is separate from
+	// analyse because it wants a different model — analyse defaults to a cheap
+	// one for reading, and this decides everything downstream.
+	RoleArchitect = "architect"
 )
 
 // RoleNames is every role, in the order the dashboard shows them.
-var RoleNames = []string{RoleCode, RoleReview, RoleAnalyse}
+var RoleNames = []string{RoleCode, RoleReview, RoleAnalyse, RoleArchitect}
 
 // RoleDescriptions explains what each role does, for the settings pane.
 var RoleDescriptions = map[string]string{
-	RoleCode:    "writes the plan and the implementation",
-	RoleReview:  "reviews the plan and the diff, and produces the verdict",
-	RoleAnalyse: "reads a repository and proposes a task list",
+	RoleCode:      "writes the plan and the implementation",
+	RoleReview:    "reviews the plan and the diff, and produces the verdict",
+	RoleAnalyse:   "reads a repository and proposes a task list",
+	RoleArchitect: "talks a design through with you, then proposes the tasks",
 }
 
 // Provider is an endpoint overseer can point an agent CLI at.
@@ -106,6 +112,9 @@ func defaultRoles() map[string]Role {
 		RoleCode:    {Agent: AgentClaude, Provider: "anthropic"},
 		RoleReview:  {Agent: AgentCodex, Provider: "openai"},
 		RoleAnalyse: {Agent: AgentClaude, Provider: "anthropic", Model: "claude-sonnet-5"},
+		// The strongest model by default: this conversation decides what
+		// everything else builds.
+		RoleArchitect: {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
 	}
 }
 
