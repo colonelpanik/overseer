@@ -115,6 +115,12 @@ func TestSandboxSpecUsesResolvedGitDirsNotRepoPath(t *testing.T) {
 	}
 }
 
+// This is the whole of "the reviewer cannot write" whenever overseer is
+// confining the agents. codex used to assert it a second time with its own
+// -s read-only, but every codex sandbox mode is built out of bubblewrap and a
+// nested user namespace is refused on kernels that gate them behind AppArmor,
+// so a confined codex is told to skip its own sandbox entirely (CodexArgs).
+// The mount below is what remains, and it has to be right.
 func TestSandboxSpecGivesTheReviewerNoWriteAccess(t *testing.T) {
 	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `{"verdict":"approved","findings":[]}`))
 	task := h.submit(t, "reviewer is read only")

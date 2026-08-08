@@ -14,15 +14,44 @@ type CodexOpts struct {
 	SchemaPath      string
 	LastMessagePath string
 	Model           string
+	// ExternallySandboxed says overseer is already confining this process, so
+	// codex must not build a sandbox of its own. See CodexArgs.
+	ExternallySandboxed bool
 }
 
-// CodexArgs builds the argv for a headless Codex review.
+// CodexArgs builds the argv for a headless Codex invocation.
 //
-// -s read-only is always passed: the reviewer must never be able to write.
-// The caller must additionally set the process's stdin to /dev/null, because
-// codex exec appends piped stdin to the prompt and blocks waiting for EOF.
+// The caller must set the process's stdin to /dev/null, because codex exec
+// appends piped stdin to the prompt and blocks waiting for EOF.
+//
+// # Which sandbox
+//
+// codex implements every one of its sandbox modes with bubblewrap — including
+// danger-full-access, which is a permissive bwrap template rather than no bwrap
+// at all. Inside overseer's own bwrap that is a nested user namespace, which a
+// kernel gating them behind an AppArmor profile refuses, so every shell command
+// the reviewer runs dies with
+//
+//	bwrap: No permissions to create a new namespace
+//
+// and the review comes back having read nothing. --dangerously-bypass-approvals-
+// and-sandbox is the only flag that skips sandbox construction outright, and
+// codex documents it for exactly this: "intended solely for running in
+// environments that are externally sandboxed".
+//
+// The name is alarming and the alarm is warranted — it is passed ONLY when
+// overseer is confining the process itself. The confinement it replaces is not
+// lost: bwrap supplies it, and the reviewer's worktree is mounted read-only
+// there (roleWrites in engine/roles.go), so the reviewer still cannot write
+// whatever codex would have permitted. With overseer's sandbox off, codex keeps
+// -s read-only, because then its own sandbox is the only one there is.
 func CodexArgs(o CodexOpts) []string {
-	args := []string{"exec", "-s", "read-only", "--json"}
+	args := []string{"exec", "--json"}
+	if o.ExternallySandboxed {
+		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+	} else {
+		args = append(args, "-s", "read-only")
+	}
 	if o.SchemaPath != "" {
 		args = append(args, "--output-schema", o.SchemaPath)
 	}
