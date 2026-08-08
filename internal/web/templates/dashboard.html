@@ -49,6 +49,7 @@
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "repos"}}">Repos</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "backlog"}}">Backlog{{if .OpenBacklog}} <span class="count">{{.OpenBacklog}}</span>{{end}}</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "analyses"}}">Analyses</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardDesign}}">Design something</a>
     <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardNew}}">Analyse a repo</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "settings"}}">Models</a>
     <a class="btn btn-primary" href="{{.Q.URL "overlay" "add"}}">Queue task</a>
@@ -495,11 +496,11 @@
 <div class="backdrop top">
   <div class="sheet wizard">
     <div class="head">
-      <h4 style="margin:0">Analyse a repository</h4>
+      <h4 style="margin:0">{{if .Designing}}Design it together{{else}}Analyse a repository{{end}}</h4>
       <ol class="steps-rail">
         <li class="{{if ge .Step 1}}done{{end}}{{if eq .Step 1}} on{{end}}">Source</li>
-        <li class="{{if ge .Step 2}}done{{end}}{{if eq .Step 2}} on{{end}}">Focus</li>
-        <li class="{{if ge .Step 3}}done{{end}}{{if eq .Step 3}} on{{end}}">Analysing</li>
+        <li class="{{if ge .Step 2}}done{{end}}{{if eq .Step 2}} on{{end}}">{{if .Designing}}Design{{else}}Focus{{end}}</li>
+        <li class="{{if ge .Step 3}}done{{end}}{{if eq .Step 3}} on{{end}}">{{if eq .Kind "create"}}Scaffolding{{else}}Analysing{{end}}</li>
         <li class="{{if ge .Step 4}}done{{end}}{{if eq .Step 4}} on{{end}}">Review</li>
       </ol>
       <span class="spacer"></span>
@@ -522,6 +523,49 @@
         <p class="muted" style="font-size:13px;margin:0">{{.Body}}</p>
       </div>
       {{end}}
+      {{else}}
+      {{if .Designing}}
+      <form method="post" action="/design">
+        <div class="body">
+          <div class="small">Talk it through with an architect first. It will ask what it needs
+            to know, say what it would build, and disagree where it disagrees. When you accept,
+            it writes the design down and breaks it into tasks.</div>
+          <div class="field">
+            <label for="brief">What do you want built, or changed?</label>
+            <textarea class="input" id="brief" name="brief" required style="min-height:90px"
+                      placeholder="A CLI that syncs S3 buckets one way, resumable, Go, no third-party dependencies."></textarea>
+          </div>
+          <div class="or">for</div>
+          <div class="field">
+            <label for="newpath">A new project, at this path</label>
+            <input class="input" id="newpath" name="new_path" placeholder="/home/you/code/new-thing">
+            <p class="muted" style="font-size:11.5px;margin:6px 0 0">
+              Created and initialised now, so the architect has somewhere real to work. It must
+              be empty, and not inside another repository.
+            </p>
+          </div>
+          <div class="or">or</div>
+          <div class="field">
+            <label for="drepo">A repository that already exists</label>
+            <input class="input" id="drepo" name="repo" list="repos"
+                   placeholder="a repo name, or /home/you/code/some-repo">
+            <datalist id="repos">
+              {{range .Repos}}<option value="{{.Slug}}" label="{{.Path}}">{{end}}
+            </datalist>
+            <p class="muted" style="font-size:11.5px;margin:6px 0 0">
+              Read only. The architect reads the code so its questions are grounded, and cannot
+              write to it.
+            </p>
+          </div>
+        </div>
+        <div class="foot">
+          <span class="small">The conversation costs one agent turn per reply.</span>
+          <span class="spacer"></span>
+          <a class="btn btn-secondary" href="{{.CloseURL}}">Cancel</a>
+          <button class="btn btn-primary" type="submit">Start designing</button>
+        </div>
+      </form>
+
       {{else}}
       <form method="post" action="/analyse">
         <div class="body">
@@ -575,6 +619,45 @@
           <span class="spacer"></span>
           <a class="btn btn-secondary" href="{{.CloseURL}}">Cancel</a>
           <button class="btn btn-primary" type="submit">Continue</button>
+        </div>
+      </form>
+      {{end}}
+      {{end}}
+
+    {{else if and (eq .Step 2) .Design}}
+      {{with .Design}}
+      <div class="body convo">
+        <div class="small">Designing {{.Target}}. Say what you want, answer what it asks, and
+          disagree where you disagree — this conversation decides what gets built. Nothing is
+          queued and nothing is written until you accept.</div>
+
+        <div class="turns">
+          {{range .Turns}}
+          <div class="turn {{if .Mine}}mine{{else}}theirs{{end}}{{if .Err}} bad{{end}}">
+            <div class="who"><span class="label">{{if .Mine}}you{{else}}architect{{end}}</span><span class="small">{{.When}}</span></div>
+            <div class="said">{{.Body}}</div>
+          </div>
+          {{end}}
+          {{if .Busy}}
+          <div class="turn theirs thinking">
+            <div class="who"><span class="pip"></span><span class="label">architect</span></div>
+            <div class="said">thinking…</div>
+          </div>
+          {{end}}
+        </div>
+      </div>
+
+      <form method="post" action="/design/{{$.Wizard.ID}}/say" class="convo-say">
+        {{/* id="reply" is what the reload guard looks for: the page reloads on
+             every state event, and would otherwise wipe this mid-sentence. */}}
+        <textarea class="input" id="reply" name="message" rows="3"
+                  placeholder="Answer, push back, or change your mind…"></textarea>
+        <div class="foot">
+          <span class="small">{{.Spend}} so far · each reply is one agent turn</span>
+          <span class="spacer"></span>
+          <button class="btn btn-secondary" type="submit" {{if .Busy}}disabled{{end}}>Send</button>
+          <button class="btn btn-primary" type="submit" formaction="/design/{{$.Wizard.ID}}/accept"
+                  {{if .Busy}}disabled{{end}}>Accept the design</button>
         </div>
       </form>
       {{end}}
@@ -1223,7 +1306,16 @@
   const live = document.getElementById("live");
   es.onopen = () => { live.textContent = "live"; };
   es.onerror = () => { live.textContent = "reconnecting…"; };
-  es.addEventListener("change", () => { location.reload(); });
+  // The one exception to reloading on every event. A design conversation has a
+  // reply box, the daemon notifies every couple of seconds while the architect
+  // is answering, and a reload mid-sentence would throw away what the operator
+  // was typing. A stale page is a much smaller harm, and the next event after
+  // the box is empty catches up.
+  const holdsTyping = () => {
+    const reply = document.getElementById("reply");
+    return reply && (reply.value.trim() !== "" || document.activeElement === reply);
+  };
+  es.addEventListener("change", () => { if (!holdsTyping()) location.reload(); });
 
   // Keep the live pane pinned to the newest output across those reloads.
   const stream = document.getElementById("stream");

@@ -45,7 +45,7 @@ func TestStartDesignOpensWithTheBriefAndAReply(t *testing.T) {
 	h := newHarness(t, fakeArchitect(t, "Two questions before I sketch this."), "true")
 	ctx := context.Background()
 
-	p, err := h.eng.StartDesign(ctx, "", "a CLI that syncs S3 buckets, Go, no dependencies")
+	p, err := h.eng.StartDesign(ctx, "", "a CLI that syncs S3 buckets, Go, no dependencies", false)
 	if err != nil {
 		t.Fatalf("StartDesign: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestSayResumesTheSession(t *testing.T) {
 	h := newHarness(t, fakeArchitect(t, "Understood."), "true")
 	ctx := context.Background()
 
-	p, err := h.eng.StartDesign(ctx, "", "a thing")
+	p, err := h.eng.StartDesign(ctx, "", "a thing", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestSayRefusesWhileAReplyIsInFlight(t *testing.T) {
 	h := newHarness(t, blockingClaude(t), "true")
 	ctx := context.Background()
 
-	p, err := h.eng.StartDesign(ctx, "", "a thing")
+	p, err := h.eng.StartDesign(ctx, "", "a thing", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestAFailedTurnKeepsTheConversation(t *testing.T) {
 	h := newHarness(t, writeScript(t, "claude", "exit 1"), "true")
 	ctx := context.Background()
 
-	p, err := h.eng.StartDesign(ctx, "", "a thing")
+	p, err := h.eng.StartDesign(ctx, "", "a thing", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestAcceptProducesTheDesignAndTheTasks(t *testing.T) {
 	ctx := context.Background()
 
 	// An existing repository, so this is a redesign and no scaffolding follows.
-	p, err := h.eng.StartDesign(ctx, h.repo, "make the storage layer resumable")
+	p, err := h.eng.StartDesign(ctx, h.repo, "make the storage layer resumable", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestAcceptRefusesTasksWithoutADesign(t *testing.T) {
 	h := newHarness(t, fakeArchitect(t, `{"tasks":[]}`), "true")
 	ctx := context.Background()
 
-	p, err := h.eng.StartDesign(ctx, h.repo, "a change")
+	p, err := h.eng.StartDesign(ctx, h.repo, "a change", false)
 	if err != nil {
 		t.Fatal(err)
 	}

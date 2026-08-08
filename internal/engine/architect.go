@@ -15,9 +15,14 @@ import (
 // StartDesign opens a design conversation.
 //
 // The repository is optional. With one, the architect reads it and its
-// questions are grounded in what is actually there; without one, this is a new
-// project and the conversation decides what it is.
-func (e *Engine) StartDesign(ctx context.Context, repoRef, brief string) (store.Proposal, error) {
+// questions are grounded in what is actually there; without one, the
+// conversation decides what the project is.
+//
+// newProject says the repository is one just created for this design, so what
+// follows is scaffolding rather than a redesign. It cannot be inferred from the
+// path being empty: the wizard creates the project first, precisely so the
+// architect has somewhere real to work.
+func (e *Engine) StartDesign(ctx context.Context, repoRef, brief string, newProject bool) (store.Proposal, error) {
 	if strings.TrimSpace(brief) == "" {
 		return store.Proposal{}, fmt.Errorf("say what you want built, or changed")
 	}
@@ -34,8 +39,11 @@ func (e *Engine) StartDesign(ctx context.Context, repoRef, brief string) (store.
 		if err != nil {
 			return store.Proposal{}, err
 		}
-		// An existing repository: this is a redesign, not a new project.
-		p.Kind = store.ProposalAnalyse
+		if !newProject {
+			// A repository that was already there: this is a redesign, and
+			// there is nothing to scaffold.
+			p.Kind = store.ProposalAnalyse
+		}
 		p.RepoID = repo.ID
 		p.RepoPath = repo.Path
 		p.Detected = repo.Detected

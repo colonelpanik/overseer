@@ -62,7 +62,8 @@ func templateFuncs() template.FuncMap {
 		},
 		// The wizard's "not created yet" id, so the template names the
 		// constant rather than repeating a bare -1.
-		"wizardNew": func() int64 { return WizardNew },
+		"wizardNew":    func() int64 { return WizardNew },
+		"wizardDesign": func() int64 { return WizardDesign },
 	}
 }
 
@@ -100,6 +101,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /resume", s.requireSameOrigin(s.handleResume))
 	mux.HandleFunc("POST /settings", s.requireSameOrigin(s.handleSettings))
 	mux.HandleFunc("POST /analyse", s.requireSameOrigin(s.handleAnalyse))
+	mux.HandleFunc("POST /design", s.requireSameOrigin(s.handleDesign))
+	mux.HandleFunc("POST /design/{id}/say", s.requireSameOrigin(s.handleSay))
+	mux.HandleFunc("POST /design/{id}/accept", s.requireSameOrigin(s.handleAccept))
 	mux.HandleFunc("POST /analyse/{id}/focus", s.requireSameOrigin(s.handleAnalyseFocus))
 	mux.HandleFunc("POST /analyse/{id}/regenerate", s.requireSameOrigin(s.handleAnalyseRegenerate))
 	mux.HandleFunc("POST /analyse/{id}/task/{taskID}", s.requireSameOrigin(s.handleAnalyseTask))

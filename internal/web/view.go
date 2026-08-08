@@ -309,10 +309,20 @@ type AddForm struct {
 // Wizard step numbers, which are also the order they happen in.
 const (
 	StepSource = 1
+	// StepDesign is the architect conversation. It shares a number with Focus
+	// because they are the same moment in the two flows: the step where the
+	// operator says what they want before anything is paid for.
+	StepDesign = 2
 	StepFocus  = 2
 	StepRun    = 3
 	StepReview = 4
 )
+
+// WizardDesign is the wizard id for "opened to design something, but nothing
+// created yet". Like WizardNew, a negative id that cannot collide with a real
+// one — the first screen creates no row, because an operator who changes their
+// mind should not leave a proposal behind.
+const WizardDesign = -2
 
 // WizardNew is the wizard id for "opened, but nothing created yet".
 //
@@ -386,6 +396,15 @@ type WizardView struct {
 	// pass, which is what makes a reopened analysis legible.
 	AlreadyQueued int
 
+	// Kind is analyse or create, as stored on the proposal.
+	Kind string
+	// Designing is the architect flow rather than the analysis one. Separate
+	// from Kind because it is true before a proposal exists — the first screen
+	// creates no row — and because a redesign of an existing repository is an
+	// analyse-kind proposal that still went through the conversation.
+	Designing bool
+	// Design is the conversation surface, on the steps where there is one.
+	Design *DesignPane
 	// Repos are the registered repositories offered on the first step. A
 	// dropdown rather than a typed path: analysing the same repository twice is
 	// the normal case, and the second time should not need the path again.
@@ -394,6 +413,34 @@ type WizardView struct {
 	ReposURL string
 
 	CloseURL string
+}
+
+// DesignPane is the architect conversation.
+type DesignPane struct {
+	Turns []DesignTurn
+	// Busy is true while a reply is in flight — the operator's turn was the
+	// last thing said. The reply box stays open anyway, because thinking of
+	// the next thing while it answers is the normal way to use this.
+	Busy bool
+	// Spend is what the conversation has cost so far. Said plainly, because a
+	// design conversation is the one surface where an operator can spend a
+	// lot without noticing they are doing it.
+	Spend string
+	// Target names what is being designed: a repository, or nothing yet.
+	Target string
+	// Accepted is true once the conversation is over.
+	Accepted bool
+}
+
+// DesignTurn is one thing said.
+type DesignTurn struct {
+	Speaker string
+	Body    string
+	When    string
+	// Mine is true for the operator's turns, which the template sides
+	// differently.
+	Mine bool
+	Err  bool
 }
 
 // FocusAreas are the choices offered on the wizard's second step.
@@ -521,7 +568,19 @@ func buildWizard(p store.Proposal, rows []store.ProposalTask, live *LivePane, q 
 		w.Focus = append(w.Focus, area)
 	}
 
+	w.Kind = p.Kind
 	switch p.State {
+	case store.ProposalDesigning:
+		w.Step = StepDesign
+	case store.ProposalScaffolding:
+		w.Step = StepRun
+		w.Waiting = &WizardWaiting{
+			Title: "Building the scaffold",
+			Body: "One turn, writing the skeleton every later task assumes: the layout, " +
+				"the manifest, something that builds, and a test command that works. " +
+				"It is committed straight to the default branch — the features come " +
+				"afterwards, as tasks, each planned and reviewed on its own branch.",
+		}
 	case store.ProposalCloning:
 		w.Step = StepSource
 		w.Waiting = &WizardWaiting{
