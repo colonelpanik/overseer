@@ -21,7 +21,12 @@ type Step struct {
 	Provider string
 	// RunSeq is which attempt of the task this step belongs to, so a restarted
 	// task's history stays separable from the attempt before it.
-	RunSeq         int
+	RunSeq int
+	// Interrupted says this step was taken away rather than having failed —
+	// the operator stopped the task, or the daemon shut down. Both leave an
+	// ErrMsg saying the process was killed, which is indistinguishable from a
+	// crash, so the caller has to say which it was.
+	Interrupted    bool
 	State          string
 	StartedAt      time.Time
 	EndedAt        time.Time
@@ -80,9 +85,15 @@ func (s *Store) StartStep(ctx context.Context, st Step) (Step, error) {
 // A step with ErrMsg set is recorded as failed; otherwise done.
 func (s *Store) FinishStep(ctx context.Context, st Step, findings []Finding) error {
 	st.EndedAt = time.Now().UTC()
-	st.State = "done"
-	if st.ErrMsg != "" {
+	switch {
+	case st.Interrupted:
+		// Not "failed": the step did not fail, it was stopped. A task the
+		// operator parked must not read on the timeline as one that broke.
+		st.State = "interrupted"
+	case st.ErrMsg != "":
 		st.State = "failed"
+	default:
+		st.State = "done"
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)

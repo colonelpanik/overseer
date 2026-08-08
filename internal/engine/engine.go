@@ -170,6 +170,16 @@ func (e *Engine) Recover(ctx context.Context) error {
 	if m > 0 {
 		fmt.Fprintf(os.Stderr, "overseer: marked %d stranded analysis/analyses from a previous run\n", m)
 	}
+
+	// A global stop is a decision, not a condition, so it survives the restart.
+	// Individual stops need nothing here: they are a column on the task, and
+	// the claim query already reads it.
+	if err := e.RestoreStopAll(ctx); err != nil {
+		return err
+	}
+	if reason := e.PauseReason(); reason != "" {
+		fmt.Fprintf(os.Stderr, "overseer: run is stopped (%s); nothing will dispatch until it is cleared\n", reason)
+	}
 	return nil
 }
 
@@ -723,6 +733,9 @@ retry:
 	step.OutputTokens = res.OutputTokens
 	step.ErrMsg = res.ErrMsg
 	step.TranscriptPath = transcript
+	// A killed agent reports "signal: killed", which is what a crash reports
+	// too. res.Canceled is the only thing that knows the difference.
+	step.Interrupted = res.Canceled
 	// Detached from ctx on purpose. A stopped or shut-down step really did end,
 	// and we know its exit code and its usage; writing that with the context
 	// that was just cancelled leaves the row "running" and the dashboard's live

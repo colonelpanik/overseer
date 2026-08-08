@@ -122,6 +122,13 @@ func TestHardStopParksTheTaskWithoutFailingIt(t *testing.T) {
 	if last.State == "running" {
 		t.Error("the step is still running; the live pane would spin forever")
 	}
+	// interrupted, not failed. A killed agent reports "signal: killed", which is
+	// exactly what a crash reports, so nothing but the cancellation flag can
+	// tell them apart — and a task the operator parked must not read on the
+	// timeline as one that broke.
+	if last.State != "interrupted" {
+		t.Errorf("step state = %q, want interrupted", last.State)
+	}
 	if last.EndedAt.IsZero() {
 		t.Error("the step has no end time")
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"overseer/internal/loop"
 	"overseer/internal/store"
 	"overseer/internal/worktree"
 )
@@ -26,11 +27,23 @@ func Tone(state string) string {
 	switch state {
 	case "escalated", "failed":
 		return ToneAlert
-	case "queued", "done":
+	// abandoned is muted, not alert: an operator ending a task is not the
+	// board asking for their attention. That is the whole reason it is not
+	// "failed".
+	case "queued", "done", "abandoned":
 		return ToneMuted
 	default:
 		return ToneLive
 	}
+}
+
+// TaskTone is Tone with the stop taken into account. A stopped task is resting,
+// however mid-flight the state it is resting in.
+func TaskTone(t store.Task) string {
+	if t.Stopped() {
+		return ToneMuted
+	}
+	return Tone(t.State)
 }
 
 // Progress renders the phase and iteration counter, which is the fastest
@@ -47,6 +60,12 @@ func Progress(t store.Task) string {
 // differently; an operator reading the board only needs to know a review is
 // happening.
 func stateLabel(t store.Task, blocked bool) string {
+	// Stopped wins over whatever the task was doing. The state column keeps
+	// naming the action in flight — that is what starting it again
+	// re-dispatches — but to an operator the task is stopped, not planning.
+	if t.Stopped() {
+		return "stopped"
+	}
 	switch t.State {
 	case "queued":
 		if blocked {
@@ -220,7 +239,23 @@ type Right struct {
 	Diff   *DiffPane
 	Ledger []LedgerRow
 	Live   *LivePane
+	Plan   *PlanPane
 	Intro  string
+}
+
+// PlanPane is the plan tab.
+type PlanPane struct {
+	Body string
+	// Editable is true only while the task is stopped. A write landing mid-turn
+	// races the agent editing the same worktree, so the form is not offered at
+	// all rather than offered and refused.
+	Editable bool
+	// Why explains what the operator can do from here, and why not more.
+	Why   string
+	Empty string
+	// Path is where the file lives, for an operator who would rather use their
+	// own editor.
+	Path string
 }
 
 // Detail is the selected task.
@@ -396,6 +431,10 @@ type Dashboard struct {
 	OverRunCap bool
 
 	PauseReason string
+	// StoppedAll distinguishes the operator's own global stop from the
+	// authentication pause. They share the dispatch gate but not the banner:
+	// one is a decision to undo, the other a condition to retry.
+	StoppedAll bool
 
 	Budget *BudgetAlert
 	Toast  *Toast
@@ -576,7 +615,7 @@ func buildRows(facts []taskFacts, q Query) []Row {
 			ID:       t.ID,
 			Selected: q.Sel == t.ID,
 			State:    state,
-			Tone:     Tone(t.State),
+			Tone:     TaskTone(t),
 			Goal:     t.Goal,
 			Repo:     repoName(t.RepoPath) + " · " + branchName(t),
 			Bars:     bars(f.Rounds, 6, 4, 15),
@@ -674,7 +713,7 @@ func defaultTab(t store.Task) string {
 func buildFilters(all []taskFacts, q Query) []Chip {
 	counts := map[string]int{FilterAll: len(all)}
 	for _, f := range all {
-		switch Tone(f.Task.State) {
+		switch TaskTone(f.Task) {
 		case ToneAlert:
 			counts[FilterAttention]++
 		case ToneLive:
@@ -736,7 +775,7 @@ func buildDetail(f taskFacts, steps []store.Step, byStep map[int64][]store.Findi
 		ID:       t.ID,
 		Slug:     t.Slug,
 		State:    stateLabel(t, f.Blocked),
-		Tone:     Tone(t.State),
+		Tone:     TaskTone(t),
 		Progress: "not started",
 		Branch:   branchName(t),
 		Goal:     t.Goal,
@@ -816,8 +855,28 @@ func detailActions(f taskFacts) []Action {
 			Fields: []Field{{Name: "cost_cap", Value: fmt.Sprintf("%.2f", nextCap(f.Totals.CostUSD, t.CostCapUSD))}},
 		})
 	}
-	if t.State != "done" && t.State != "failed" {
-		out = append(out, Action{Label: "Abandon", Kind: "secondary", Post: "/task/" + id + "/abandon"})
+	// Stop, start and restart, in the order an operator reaches for them.
+	switch {
+	case t.Stopped():
+		out = append(out,
+			Action{Label: "Start", Kind: "primary", Post: "/task/" + id + "/start"})
+	case !loop.IsTerminal(t.State):
+		// Soft first. It costs at most one agent turn and leaves nothing
+		// half-written, so it is the one that should be easy to press.
+		out = append(out,
+			Action{Label: "Stop", Kind: "secondary", Post: "/task/" + id + "/stop"},
+			Action{
+				Label:  "Stop now",
+				Kind:   "ghost",
+				Post:   "/task/" + id + "/stop",
+				Fields: []Field{{Name: "now", Value: "1"}},
+			})
+	}
+	if t.PRURL == "" {
+		out = append(out, Action{Label: "Restart", Kind: "ghost", Post: "/task/" + id + "/restart"})
+	}
+	if !loop.IsTerminal(t.State) {
+		out = append(out, Action{Label: "Abandon", Kind: "ghost", Post: "/task/" + id + "/abandon"})
 	}
 	return out
 }
@@ -1050,7 +1109,7 @@ func stepTitle(t store.Task, s store.Step, prevBlocking int) string {
 
 // buildRight assembles the right-hand pane for the current tab.
 func buildRight(f taskFacts, steps []store.Step, byStep map[int64][]store.Finding,
-	diff []worktree.FileDiff, diffErr error, live *LivePane, q Query) Right {
+	diff []worktree.FileDiff, diffErr error, live *LivePane, plan *PlanPane, q Query) Right {
 
 	rows := ledger(steps, byStep, f.Rounds)
 	open := 0
@@ -1066,6 +1125,7 @@ func buildRight(f taskFacts, steps []store.Step, byStep map[int64][]store.Findin
 			{Label: "Diff", On: q.Tab == TabDiff, URL: q.URL("tab", TabDiff)},
 			{Label: "Findings", On: q.Tab == TabFindings, URL: q.URL("tab", TabFindings)},
 			{Label: "Live", On: q.Tab == TabLive, URL: q.URL("tab", TabLive)},
+			{Label: "Plan", On: q.Tab == TabPlan, URL: q.URL("tab", TabPlan)},
 		},
 	}
 
@@ -1082,6 +1142,12 @@ func buildRight(f taskFacts, steps []store.Step, byStep map[int64][]store.Findin
 		r.Live = live
 		if live != nil {
 			r.Sub = live.Meta
+		}
+	case TabPlan:
+		r.Title = "Plan"
+		r.Plan = plan
+		if plan != nil && plan.Editable {
+			r.Sub = "editable while stopped"
 		}
 	default:
 		r.Title = "Diff"

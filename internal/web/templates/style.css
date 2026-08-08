@@ -769,3 +769,26 @@ pre.term {
   .ledger > div { border-left: 0; border-top: 1px solid var(--color-divider); }
   .listrow .edit .pair { grid-template-columns: 1fr; }
 }
+
+/* ── stop, and the plan ───────────────────────────────────────────────── */
+
+/* The panic button. Outlined rather than filled: it sits beside "Queue task",
+   and two solid accent buttons next to each other invite the wrong one. */
+.btn-stopall { border-color: var(--color-accent); color: var(--color-accent-700); }
+.btn-stopall:hover { background: var(--color-accent); color: var(--color-bg); }
+
+.planpane { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
+.planform { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.planform textarea {
+  min-height: 46vh; resize: vertical;
+  font: 400 12.5px/1.6 var(--font-mono);
+}
+.plantext {
+  margin: 0; padding: 12px; white-space: pre-wrap; word-break: break-word;
+  font: 400 12.5px/1.6 var(--font-mono);
+  background: var(--color-surface);
+  border-left: 2px solid var(--color-divider);
+}
+.planfoot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.planfoot .small { text-wrap: pretty; max-width: 70ch; }
+.planpath { opacity: .7; overflow-wrap: anywhere; }

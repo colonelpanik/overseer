@@ -37,10 +37,16 @@ Usage:
   overseer status                list tasks and their progress
   overseer repos                 list repositories, what they cost, and their backlogs
   overseer backlog [repo]        list what is worth doing, per repository
+  overseer stop <task-id>        park a task where it is (-now kills the agent)
+  overseer start <task-id>       put a stopped task back to work
+  overseer restart <task-id>     run a task again, on a fresh branch
+  overseer plan <task-id>        print the plan a task is working from
   overseer logs <task-id>        print a task's transcripts
 
 Flags:
   -config <path>   config file (default ~/.overseer/config.yaml)
+  -now             with stop/restart: kill the agent instead of letting its
+                   current turn finish
 `)
 }
 
@@ -53,6 +59,7 @@ func run(args []string) error {
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	home, _ := os.UserHomeDir()
 	configPath := fs.String("config", filepath.Join(home, ".overseer", "config.yaml"), "config file")
+	now := fs.Bool("now", false, "stop or restart by killing the agent mid-turn, rather than letting its turn finish")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -73,6 +80,14 @@ func run(args []string) error {
 		return cmdRepos(cfg)
 	case "backlog":
 		return cmdBacklog(cfg, fs.Arg(0))
+	case "stop":
+		return cmdStop(cfg, fs.Arg(0), *now)
+	case "start":
+		return cmdStart(cfg, fs.Arg(0))
+	case "restart":
+		return cmdRestart(cfg, fs.Arg(0), *now)
+	case "plan":
+		return cmdPlan(cfg, fs.Arg(0))
 	case "logs":
 		return cmdLogs(cfg, fs.Arg(0))
 	default:

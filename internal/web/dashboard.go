@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"overseer/internal/agent"
+	"overseer/internal/engine"
 	"overseer/internal/store"
 	"overseer/internal/worktree"
 )
@@ -97,7 +98,7 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 
 	running := 0
 	for _, f := range all {
-		if Tone(f.Task.State) == ToneLive {
+		if TaskTone(f.Task) == ToneLive {
 			running++
 		}
 	}
@@ -122,6 +123,12 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 		d.RunCap = "/ " + money(s.cfg.RunCapUSD) + " run cap"
 		d.OverRunCap = reported+metered > s.cfg.RunCapUSD
 	}
+	stoppedAll, err := s.store.Setting(ctx, store.SettingStopAll)
+	if err != nil {
+		return nil, err
+	}
+	d.StoppedAll = stoppedAll != ""
+
 	d.Budget = budgetAlert(all, q)
 	d.Toast = parkedToast(all, q)
 	d.Add = s.addForm(all, repos, q)
@@ -284,14 +291,56 @@ func (s *Server) buildSelection(ctx context.Context, f taskFacts, q Query) (*Det
 	var files []worktree.FileDiff
 	var diffErr error
 	var live *LivePane
+	var plan *PlanPane
 	switch q.Tab {
 	case TabDiff:
 		files, diffErr = s.diff(ctx, f.Task)
 	case TabLive:
 		live = livePane(f.Task, steps)
+	case TabPlan:
+		plan = s.planPane(ctx, f.Task)
 	}
-	d.Right = buildRight(f, steps, byStep, files, diffErr, live, q)
+	d.Right = buildRight(f, steps, byStep, files, diffErr, live, plan, q)
 	return d, nil
+}
+
+// planPane reads the plan the next turn will act on.
+//
+// Read from the worktree rather than the branch, because that is where every
+// agent reads it from — so this shows what will actually happen, not what was
+// last committed.
+func (s *Server) planPane(ctx context.Context, task store.Task) *PlanPane {
+	p := &PlanPane{
+		Editable: task.Stopped(),
+		Path:     engine.PlanPath(task),
+	}
+	switch {
+	case task.WorktreeDir == "":
+		p.Empty = "No plan yet. One is written in the first planning turn, once this task has a worktree."
+		return p
+	case task.PRURL != "":
+		p.Empty = "This task's worktree was removed when its pull request opened. The plan is in the branch and in the pull request body."
+		return p
+	}
+
+	body, err := s.eng.ReadPlan(ctx, task.ID)
+	if err != nil {
+		p.Empty = err.Error()
+		return p
+	}
+	p.Body = body
+	if body == "" {
+		p.Empty = "The planning turn has not written PLAN.md yet."
+	}
+
+	if p.Editable {
+		p.Why = "Edits are committed to the branch, and the next turn starts fresh from this file " +
+			"rather than resuming the session that wrote it — so what you write here is what gets built."
+	} else {
+		p.Why = "Stop the task to edit this. A write while an agent is working the same tree would " +
+			"race it, and would be swept into that turn's commit as if the agent had made it."
+	}
+	return p
 }
 
 // diff reads the task's accumulated change against its base ref.

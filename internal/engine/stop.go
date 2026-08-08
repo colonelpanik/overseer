@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"overseer/internal/loop"
 	"overseer/internal/store"
@@ -171,6 +172,55 @@ func (e *Engine) applyStopDirect(ctx context.Context, task *store.Task, req stop
 		return fmt.Errorf("unknown stop kind %q", req.Kind)
 	}
 	e.notify(task.ID)
+	return nil
+}
+
+// StopAllRunning stops every task a worker is currently driving, killing their
+// agents rather than waiting for each to finish its turn.
+//
+// The scheduler is stopped separately, by the caller, and that alone is enough
+// for tasks not yet claimed. This is for the ones already mid-step, where
+// waiting out a step timeout each is the thing being avoided.
+func (e *Engine) StopAllRunning(ctx context.Context, reason string) error {
+	e.mu.Lock()
+	ids := make([]int64, 0, len(e.running))
+	for id := range e.running {
+		ids = append(ids, id)
+	}
+	e.mu.Unlock()
+
+	var failed []string
+	for _, id := range ids {
+		// Persisted first, for the same reason Stop does it: a daemon that dies
+		// in the window leaves the task parked rather than running.
+		if err := e.Store.StopTask(ctx, id, true); err != nil {
+			failed = append(failed, fmt.Sprintf("task %d: %v", id, err))
+			continue
+		}
+		err := e.applyStop(ctx, id, stopRequest{Kind: StopPark, Msg: reason, Hard: true})
+		// Already stopping is the expected answer when the operator pressed
+		// this twice, and is not worth reporting as a failure.
+		if err != nil && !strings.Contains(err.Error(), "already stopping") {
+			failed = append(failed, fmt.Sprintf("task %d: %v", id, err))
+		}
+		e.notify(id)
+	}
+	if len(failed) > 0 {
+		return errors.New(strings.Join(failed, "; "))
+	}
+	return nil
+}
+
+// RestoreStopAll re-applies a persisted global stop at startup, so a restart
+// does not quietly resume everything the operator stopped.
+func (e *Engine) RestoreStopAll(ctx context.Context) error {
+	reason, err := e.Store.Setting(ctx, store.SettingStopAll)
+	if err != nil {
+		return err
+	}
+	if reason != "" {
+		e.Pause(reason)
+	}
 	return nil
 }
 
