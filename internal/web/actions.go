@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -23,12 +24,144 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Repo:             repo,
 		Goal:             goal,
 		BlockingSeverity: strings.TrimSpace(r.FormValue("blocking_severity")),
+		Verify:           strings.TrimSpace(r.FormValue("verify")),
 	}
-	if _, err := s.eng.Submit(r.Context(), bt); err != nil {
+	for _, line := range strings.Split(r.FormValue("constraints"), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			bt.Constraints = append(bt.Constraints, line)
+		}
+	}
+	if raw := strings.TrimSpace(r.FormValue("cost_cap")); raw != "" {
+		cap, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			http.Error(w, "cost cap must be a number", http.StatusBadRequest)
+			return
+		}
+		bt.CostCap = cap
+	}
+
+	task, err := s.eng.Submit(r.Context(), bt)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Dependencies come back from the form as IDs rather than slugs: the
+	// dialog offers existing tasks, and an ID cannot go stale between the
+	// render and the submit the way a slug typed by hand can.
+	depIDs, err := parseIDList(r.Form["depends_on"])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(depIDs) > 0 {
+		if err := s.store.SetTaskDeps(r.Context(), task.ID, depIDs); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	http.Redirect(w, r, "/task/"+strconv.FormatInt(task.ID, 10), http.StatusSeeOther)
+}
+
+// handleBulk applies one action to every selected task. A run with ten parked
+// tasks is a real state, and clicking through ten task pages to say the same
+// thing ten times is how an operator ends up not saying it at all.
+func (s *Server) handleBulk(w http.ResponseWriter, r *http.Request) {
+	ids, err := parseIDList(strings.Split(r.FormValue("ids"), ","))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(ids) == 0 {
+		http.Error(w, "no tasks selected", http.StatusBadRequest)
+		return
+	}
+
+	action := r.FormValue("action")
+	var failures []string
+	for _, id := range ids {
+		var err error
+		switch action {
+		case "continue":
+			err = s.eng.ContinueEscalated(r.Context(), id, extraIterations)
+		case "abandon":
+			err = s.eng.Abandon(r.Context(), id)
+		default:
+			http.Error(w, "unknown bulk action "+action, http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("task %d: %v", id, err))
+		}
+	}
+	// Report what did not work rather than redirecting to a board that
+	// silently kept some of the tasks in the state the operator just asked to
+	// change. The ones that did work have already been applied.
+	if len(failures) > 0 {
+		http.Error(w, strings.Join(failures, "\n"), http.StatusConflict)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) handleSeverity(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	sev := strings.TrimSpace(r.FormValue("blocking_severity"))
+	if err := s.eng.SetBlockingSeverity(r.Context(), id, sev); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/task/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
+}
+
+func (s *Server) handleCap(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	cap, err := strconv.ParseFloat(strings.TrimSpace(r.FormValue("cost_cap")), 64)
+	if err != nil {
+		http.Error(w, "cost cap must be a number", http.StatusBadRequest)
+		return
+	}
+	if err := s.eng.RaiseCap(r.Context(), id, cap); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/task/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
+}
+
+func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.eng.ReleaseDeps(r.Context(), id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/task/"+strconv.FormatInt(id, 10), http.StatusSeeOther)
+}
+
+// parseIDList reads a list of task IDs, skipping blanks and rejecting
+// anything that is not a positive integer.
+func parseIDList(raw []string) ([]int64, error) {
+	var out []int64
+	for _, s := range raw {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("%q is not a task id", s)
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {

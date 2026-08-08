@@ -15,3 +15,12 @@ tasks:
     goal: Replace the hand-rolled retry logic with a shared backoff helper.
     # Nits will not hold this one up.
     blocking_severity: major
+    # Advisory: passing it raises a banner on the dashboard, nothing more.
+    cost_cap: 8.00
+
+  - repo: /home/kal/code/dc-planner
+    goal: Add a column picker to the rack inventory view.
+    # Waits for the earlier task to reach done. The name is that task's slug,
+    # derived from its goal; a slug nothing matches fails the submit.
+    depends_on:
+      - add-csv-export-to-the-rack-inventory-view

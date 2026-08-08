@@ -172,6 +172,116 @@ func (s *Store) ListFindings(ctx context.Context, stepID int64) ([]Finding, erro
 	return out, rows.Err()
 }
 
+// AllFindings returns every finding on a task, keyed by step ID. The dashboard
+// renders a whole task at once, and asking per step is one statement per step.
+func (s *Store) AllFindings(ctx context.Context, taskID int64) (map[int64][]Finding, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.id, f.step_id, f.severity, f.file, f.line, f.summary, f.detail, f.blocking
+		FROM findings f
+		JOIN steps s ON s.id = f.step_id
+		WHERE s.task_id = ?
+		ORDER BY f.id ASC`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("query task findings: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int64][]Finding{}
+	for rows.Next() {
+		var f Finding
+		var blocking int
+		if err := rows.Scan(&f.ID, &f.StepID, &f.Severity, &f.File, &f.Line,
+			&f.Summary, &f.Detail, &blocking); err != nil {
+			return nil, fmt.Errorf("scan finding: %w", err)
+		}
+		f.Blocking = blocking == 1
+		out[f.StepID] = append(out[f.StepID], f)
+	}
+	return out, rows.Err()
+}
+
+// ReviewRound is one review step — a Codex review or a verify run — with the
+// blocking findings it raised. A verdict is what makes a step a review: Claude
+// turns never carry one.
+type ReviewRound struct {
+	TaskID    int64
+	Phase     string
+	Iteration int
+	Agent     string
+	Blocking  []string
+}
+
+// AllReviewRounds returns every task's review rounds in order, in one
+// statement. The board draws a convergence sparkline on every card, and doing
+// this per card would be two queries per task on every state event.
+func (s *Store) AllReviewRounds(ctx context.Context) (map[int64][]ReviewRound, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.task_id, s.id, s.phase, s.iteration, s.agent, f.summary
+		FROM steps s
+		LEFT JOIN findings f ON f.step_id = s.id AND f.blocking = 1
+		WHERE s.verdict <> ''
+		ORDER BY s.task_id ASC, s.id ASC, f.id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("query review rounds: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int64][]ReviewRound{}
+	var lastStep int64
+	for rows.Next() {
+		var taskID, stepID int64
+		var phase, agent string
+		var iteration int
+		var summary sql.NullString
+		if err := rows.Scan(&taskID, &stepID, &phase, &iteration, &agent, &summary); err != nil {
+			return nil, fmt.Errorf("scan review round: %w", err)
+		}
+		// The LEFT JOIN gives one row per finding, or a single null row for a
+		// review that raised nothing — which is exactly the round that has to
+		// stay in the series, because a clean round is the signal.
+		if stepID != lastStep {
+			out[taskID] = append(out[taskID], ReviewRound{
+				TaskID: taskID, Phase: phase, Iteration: iteration, Agent: agent,
+			})
+			lastStep = stepID
+		}
+		if summary.Valid {
+			list := out[taskID]
+			last := &list[len(list)-1]
+			last.Blocking = append(last.Blocking, summary.String)
+		}
+	}
+	return out, rows.Err()
+}
+
+// AllTotals sums cost and tokens for every task in one statement. The board
+// shows spend on every card, and TaskTotals per card is a query per card.
+func (s *Store) AllTotals(ctx context.Context) (map[int64]Totals, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT task_id, SUM(cost_usd), SUM(input_tokens), SUM(output_tokens)
+		FROM steps GROUP BY task_id`)
+	if err != nil {
+		return nil, fmt.Errorf("all totals: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[int64]Totals{}
+	for rows.Next() {
+		var id int64
+		var cost sql.NullFloat64
+		var in, o sql.NullInt64
+		if err := rows.Scan(&id, &cost, &in, &o); err != nil {
+			return nil, fmt.Errorf("scan totals: %w", err)
+		}
+		out[id] = Totals{
+			CostUSD:      cost.Float64,
+			InputTokens:  int(in.Int64),
+			OutputTokens: int(o.Int64),
+		}
+	}
+	return out, rows.Err()
+}
+
 // InterruptRunningSteps marks every step still in "running" as interrupted.
 // Called once at daemon startup: a running step cannot have survived a
 // restart, and leaving it running would make the dashboard lie.

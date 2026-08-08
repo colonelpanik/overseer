@@ -24,10 +24,34 @@ Requires `claude`, `codex`, `git`, and `gh` on PATH.
     overseer status                     # same information as a table
     overseer logs 3                     # one task's steps, verdicts, findings
 
-The dashboard is the point: each card shows a **`plan 3/10`** counter, so a
-task that is converging looks different at a glance from one that is
-ping-ponging. Clicking through gives the alternating timeline of Claude turns
-and Codex reviews, with each review's findings.
+Do not know what to put in the task list? Open the dashboard and press
+**Analyse a repo**.
+
+The dashboard is the point. It is one page: the task list on the left, the
+selected task on the right. Every task carries a **`plan 3/10`** counter and a
+sparkline of blocking findings per review round, so a task that is converging
+looks different at a glance from one that is ping-ponging — a hollow bar is a
+round that raised nothing.
+
+Selecting a task gives the two-lane timeline — Claude on the left, Codex and
+verify on the right — and a right-hand pane with three tabs:
+
+- **Diff** — the accumulated change against the base ref, with each still-open
+  finding pinned to the line it was raised against.
+- **Findings** — every finding ever raised on the task, whether it is still
+  open, and which round it was fixed in. A finding stays on the ledger after it
+  is resolved, so one that comes back reads as a repeat rather than as news.
+- **Live** — the running step's transcript, summarised one line per event.
+
+When a task starts going in circles the convergence chart is replaced by a
+**fingerprint matrix**: findings down the side, recent rounds across the top,
+a red cell for a finding the reviewer had already raised. That is the same
+signal the oscillation check trips on, made legible — and the task's action bar
+offers the blocking threshold that would let it finish.
+
+The whole view lives in the URL — selection, filter, open step, tab — so the
+page survives the reload the daemon triggers on every state change, and a link
+to "the parked task with its fingerprint open" is just a link.
 
 ## Configuration
 
@@ -43,12 +67,91 @@ blocking_severity: any   # any | minor | major | critical
 sandbox: auto            # auto | bwrap | off
 bwrap_bin: bwrap
 verify_command: ""
+run_cap_usd: 0           # advisory, 0 disables
+task_cap_usd: 0          # advisory default per task, 0 disables
+analysis_model: claude-sonnet-5   # drives the repo-analysis wizard
 ```
 
 `blocking_severity: any` means every Codex finding, including nits, keeps the
 loop running. That is the strictest setting and the default. If a task starts
 burning iterations on style nits, set `blocking_severity: major` on that task
 in the batch file rather than babysitting it.
+
+## Analysing a repository
+
+**Analyse a repo** on the dashboard points Claude at a repository, read-only,
+and comes back with a proposed task list you edit and queue. It is for the case
+overseer is best at and worst to start: a codebase you have just inherited and
+do not yet know what to ask for.
+
+Four steps. Give it a path already on this machine, or a URL to clone. Say what
+to look for — test coverage, tech debt, security, performance, documentation,
+correctness — plus anything else in free text and a cap on how many tasks to
+propose. Watch it read. Then review what came back: each proposal carries the
+goal, the constraints it inferred from your repository's own conventions, the
+verify command it actually found, a blocking threshold, a cost cap, the
+dependencies between tasks, and — the part worth reading first — *why*, with
+the `file:line` references behind it. Edit any of it, deselect what you do not
+want, and queue the rest. If the list is wrong in a way you can describe, say
+so and regenerate.
+
+Nothing queues itself. The wizard always ends with a human pressing the button,
+because that is the only checkpoint before money starts being spent.
+
+Three things are true of the analysis and worth knowing:
+
+- **The repository is mounted read-only**, `.git` included. `git log` and
+  `git ls-files` work; nothing can be written. An analysis cannot leave a
+  branch, a stash, or an edit behind in a repository you only asked it to read.
+- **Only `https://` and `ssh://` URLs are cloned.** Other git transports can
+  run a command the URL names — `ext::` most obviously — so they are refused.
+  A clone lands in `<data_dir>/imported/<name>`; an existing clone of the same
+  remote is reused, and a directory holding a clone of something else is an
+  error rather than an overwrite.
+- **It costs money and the dashboard says so.** Analysis spend is part of the
+  run total in the header, not a separate figure you have to go looking for.
+
+`analysis_model` picks the model (default `claude-sonnet-5`). It is a separate
+knob from whatever runs the loop: the analysis reads once and writes nothing,
+so it is worth spending less on than the turns that produce the change.
+
+## Spend caps
+
+`run_cap_usd` and `task_cap_usd` are **advisory**. Passing one raises a banner
+on the dashboard, next to a button that raises the cap; it does not stop
+anything. That is deliberate: killing an agent halfway through an edit leaves
+the worktree in a state nobody chose and throws away everything already paid
+for getting there. The cap tells you a task has gone further than you expected,
+which is the decision you actually wanted to make — not a kill switch that
+makes the mess worse.
+
+A per-task cap can be set in the batch file with `cost_cap`, or raised from the
+dashboard.
+
+## Dependencies
+
+A task can name others it must follow:
+
+```yaml
+tasks:
+  - repo: /home/kal/code/overseer
+    goal: Enable WAL mode on the store connection.
+  - repo: /home/kal/code/overseer
+    goal: Validate config.yaml against a schema at startup.
+    depends_on: [enable-wal-mode-on-the-store-connection]
+```
+
+The name is the other task's slug, which is derived from its goal. A dependency
+may be a task earlier in the same batch or one already in the database; naming
+one that does not exist fails the submit rather than queueing a task that waits
+on nothing. Cycles and self-references are rejected on write.
+
+A task waits only while it is queued. Once it has a worktree it is in flight,
+and a dependency that fails afterwards does not pull it back out.
+
+A dependency that fails will never reach done, so its dependents wait forever.
+The board shows this — it names the dependency and its state — and offers
+**Release anyway**, which clears the dependency and lets the task run.
 
 ## The verify gate
 
@@ -78,8 +181,15 @@ prints continuously cannot exhaust the daemon.
 A task escalates when it hits the iteration cap, or earlier if the same set of
 findings recurs — that means the agent is not making progress, and waiting for
 iteration 10 would just cost money. The dashboard offers **continue**,
-**abandon**, and **take over**; the last prints the `cd` and
-`claude --resume <session-id>` needed to drive the session by hand.
+**abandon**, **take over**, and a one-click raise of the blocking threshold;
+take over prints the `cd` and `claude --resume <session-id>` needed to drive
+the session by hand.
+
+With several tasks parked at once, tick them in the list and apply **continue**
+or **abandon** to the selection in one go. If any of them cannot change — a
+task a worker is currently driving cannot be abandoned — the response says so
+and names them, rather than redirecting to a board where half the selection
+quietly stayed put.
 
 ## Safety
 

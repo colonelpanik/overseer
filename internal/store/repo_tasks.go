@@ -41,8 +41,13 @@ type Task struct {
 	// FindingHashes records the blocking-findings fingerprint seen at each
 	// iteration of the current phase, for oscillation detection.
 	FindingHashes []string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// CostCapUSD is an advisory ceiling on this task's spend. Passing it
+	// raises a banner; it never stops a turn, because killing an agent
+	// mid-edit leaves the worktree in a state nobody asked for. Zero means no
+	// cap.
+	CostCapUSD float64
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 const rfc3339 = time.RFC3339Nano
@@ -63,13 +68,13 @@ func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
 			iteration, max_iterations, blocking_severity, plan_session_id,
 			exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
 			worktree_dir, pr_url, err_msg, verify_command,
-			finding_hashes, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			finding_hashes, cost_cap_usd, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.Slug, t.RepoPath, t.Goal, t.Constraints, t.State, t.Phase,
 		t.Iteration, t.MaxIterations, t.BlockingSeverity, t.PlanSessionID,
 		t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir, t.GitAdminDir,
 		t.WorktreeDir, t.PRURL, t.ErrMsg, t.VerifyCommand,
-		strings.Join(t.FindingHashes, "\n"),
+		strings.Join(t.FindingHashes, "\n"), t.CostCapUSD,
 		t.CreatedAt.Format(rfc3339), t.UpdatedAt.Format(rfc3339))
 	if err != nil {
 		return Task{}, fmt.Errorf("insert task: %w", err)
@@ -86,7 +91,7 @@ const taskColumns = `id, slug, repo_path, goal, constraints, state, phase,
 	iteration, max_iterations, blocking_severity, plan_session_id,
 	exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
 	worktree_dir, pr_url, err_msg, verify_command, finding_hashes,
-	created_at, updated_at`
+	cost_cap_usd, created_at, updated_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
 	var t Task
@@ -96,7 +101,7 @@ func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
 		&t.BlockingSeverity, &t.PlanSessionID, &t.ExecSessionID, &t.Branch,
 		&t.BaseRef, &t.GitCommonDir, &t.GitAdminDir,
 		&t.WorktreeDir, &t.PRURL, &t.ErrMsg, &t.VerifyCommand,
-		&hashes, &created, &updated)
+		&hashes, &t.CostCapUSD, &created, &updated)
 	if err != nil {
 		return Task{}, err
 	}
@@ -132,12 +137,34 @@ func (s *Store) ListTasks(ctx context.Context) ([]Task, error) {
 	return s.queryTasks(ctx, `SELECT `+taskColumns+` FROM tasks ORDER BY id DESC`)
 }
 
+// GetTaskBySlug loads one task by its slug.
+func (s *Store) GetTaskBySlug(ctx context.Context, slug string) (Task, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE slug = ?`, slug)
+	t, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, fmt.Errorf("task %q: %w", slug, ErrNotFound)
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("get task by slug: %w", err)
+	}
+	return t, nil
+}
+
 // ClaimableTasks returns tasks a worker may advance: anything not in a
-// terminal or human-gated state.
+// terminal or human-gated state, and not a queued task still waiting on a
+// dependency.
+//
+// The dependency gate applies only while a task is queued. Once it has a
+// worktree it is in flight, and a dependency that regresses afterwards must
+// not yank a running task back out of the pool mid-phase.
 func (s *Store) ClaimableTasks(ctx context.Context) ([]Task, error) {
 	return s.queryTasks(ctx, `SELECT `+taskColumns+`
 		FROM tasks
 		WHERE state NOT IN ('done', 'failed', 'escalated')
+		  AND (state <> 'queued' OR NOT EXISTS (
+		        SELECT 1 FROM task_deps d
+		        JOIN tasks p ON p.id = d.depends_on_id
+		        WHERE d.task_id = tasks.id AND p.state <> 'done'))
 		ORDER BY id ASC`)
 }
 
@@ -167,13 +194,13 @@ func (s *Store) SaveTask(ctx context.Context, t Task) error {
 			blocking_severity=?, plan_session_id=?, exec_session_id=?,
 			branch=?, base_ref=?, git_common_dir=?, git_admin_dir=?,
 			worktree_dir=?, pr_url=?, err_msg=?, verify_command=?,
-			finding_hashes=?, updated_at=?
+			finding_hashes=?, cost_cap_usd=?, updated_at=?
 		WHERE id=?`,
 		t.State, t.Phase, t.Iteration, t.MaxIterations, t.BlockingSeverity,
 		t.PlanSessionID, t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir,
 		t.GitAdminDir, t.WorktreeDir, t.PRURL,
 		t.ErrMsg, t.VerifyCommand, strings.Join(t.FindingHashes, "\n"),
-		t.UpdatedAt.Format(rfc3339), t.ID)
+		t.CostCapUSD, t.UpdatedAt.Format(rfc3339), t.ID)
 	if err != nil {
 		return fmt.Errorf("update task: %w", err)
 	}

@@ -85,6 +85,80 @@ applies, the file and line. If the change is genuinely ready, return
 want acted on.`, strings.TrimSpace(goal), baseRef)
 }
 
+// AnalysisPrompt asks for a task list for a repository nobody has written one
+// for yet.
+//
+// Three things it insists on, each because the alternative is a task list that
+// looks useful and is not. Every proposal must cite what it read, so a
+// proposal can be judged rather than taken on faith. Every goal must be one
+// self-contained change, because "improve error handling" is not something a
+// plan-review-execute loop can converge on. And the response must be the JSON
+// object alone: the Claude CLI has no --output-schema, so the schema below is
+// documentation, and the parser on the other side rejects anything else.
+func AnalysisPrompt(focus []string, notes, detected string, maxTasks int) string {
+	var b strings.Builder
+	b.WriteString(`You are proposing a queue of independent work items for this repository.
+An automated system will carry each one out on its own branch, in its own
+worktree, reviewed by a second agent until it converges, and open a draft pull
+request. A human reviews those pull requests. Nothing you propose runs without
+that human queueing it first.
+
+Read enough of the repository to be specific. Start with the README, the build
+or package manifest, the test layout and the most-changed parts of the tree.
+This checkout is READ-ONLY: you cannot edit, commit, or run anything that
+writes. Do not try.
+
+`)
+	if detected = strings.TrimSpace(detected); detected != "" {
+		b.WriteString("WHAT THE DAEMON ALREADY DETECTED:\n")
+		b.WriteString(detected)
+		b.WriteString("\n\n")
+	}
+	if len(focus) > 0 {
+		b.WriteString("THE OPERATOR ASKED YOU TO FOCUS ON:\n")
+		for _, f := range focus {
+			b.WriteString("- ")
+			b.WriteString(strings.TrimSpace(f))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if n := strings.TrimSpace(notes); n != "" {
+		b.WriteString("ADDITIONAL INSTRUCTIONS FROM THE OPERATOR:\n")
+		b.WriteString(n)
+		b.WriteString("\n\n")
+	}
+
+	fmt.Fprintf(&b, `Propose at most %d tasks. Fewer, well-founded tasks beat a long list.
+
+Each task must be:
+
+- ONE self-contained change an agent can finish and a reviewer can judge. Not a
+  theme, not an area of the codebase, not "audit X". If you cannot describe the
+  diff you expect, it is not a task.
+- Grounded in something you actually read. "rationale" says why in one
+  sentence and "evidence" lists the file:line references behind it. A task you
+  cannot cite is a task you guessed at, and you should drop it instead.
+- Carried by this repository's own conventions. Put those in "constraints" —
+  the patterns a change here has to follow, in this repository's terms.
+
+Set "verify" to the command that would prove the task is done in this
+repository — the test command you found, not one you assume. Use null only if
+this repository genuinely has none.
+
+Set "blocking_severity" to how strict the review loop should be. Use "any" by
+default; use "major" for a task where style nits would waste iterations.
+
+Use "depends_on" only for a real ordering constraint, naming the "key" of a
+task EARLIER in your array. Never name a later task and never form a cycle.
+
+Reply with a single JSON object matching this schema and nothing else — no
+prose before it, no explanation after it, no markdown fence:
+
+%s`, maxTasks, strings.TrimSpace(string(agent.ProposalSchema)))
+	return b.String()
+}
+
 // ReviseWithFindingsPrompt renders a reviewer's blocking findings as the next
 // turn of an existing agent session. target names what to revise, so the same
 // function serves both loops.

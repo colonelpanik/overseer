@@ -27,6 +27,13 @@ type BatchTask struct {
 	// Verify overrides the daemon's verify_command for this task. Empty
 	// falls back to the daemon default.
 	Verify string `yaml:"verify"`
+	// CostCap is this task's advisory spend ceiling in USD. Zero falls back to
+	// the daemon's task_cap_usd.
+	CostCap float64 `yaml:"cost_cap"`
+	// DependsOn names tasks — by slug — that must reach done before this one
+	// is claimed. A slug may name a task earlier in the same batch or one
+	// already in the database.
+	DependsOn []string `yaml:"depends_on"`
 }
 
 // Batch is a submitted task file. It carries tasks only: daemon settings
@@ -57,6 +64,9 @@ func ParseBatch(raw []byte) (Batch, error) {
 		}
 		if strings.TrimSpace(t.Goal) == "" {
 			return Batch{}, fmt.Errorf("parse batch: task %d has no goal", i+1)
+		}
+		if t.CostCap < 0 {
+			return Batch{}, fmt.Errorf("parse batch: task %d has a negative cost_cap", i+1)
 		}
 		if t.BlockingSeverity == "" {
 			continue
@@ -93,6 +103,26 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 	if verify == "" {
 		verify = e.Cfg.VerifyCommand
 	}
+	costCap := bt.CostCap
+	if costCap == 0 {
+		costCap = e.Cfg.TaskCapUSD
+	}
+
+	// Resolve dependency slugs before creating anything: a submit that names a
+	// task nobody has heard of should fail outright rather than queue a task
+	// whose stated precondition silently does not exist.
+	depIDs := make([]int64, 0, len(bt.DependsOn))
+	for _, slug := range bt.DependsOn {
+		slug = strings.TrimSpace(slug)
+		if slug == "" {
+			continue
+		}
+		dep, err := e.Store.GetTaskBySlug(ctx, slug)
+		if err != nil {
+			return store.Task{}, fmt.Errorf("depends_on %q: %w", slug, err)
+		}
+		depIDs = append(depIDs, dep.ID)
+	}
 
 	base := worktree.Slugify(bt.Goal)
 	task := store.Task{
@@ -103,6 +133,7 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 		MaxIterations:    e.Cfg.MaxIterations,
 		BlockingSeverity: severity,
 		VerifyCommand:    verify,
+		CostCapUSD:       costCap,
 	}
 
 	// Slugs are unique because they name a branch and a directory. Suffix on
@@ -114,6 +145,11 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 		}
 		created, err := e.Store.CreateTask(ctx, task)
 		if err == nil {
+			if len(depIDs) > 0 {
+				if err := e.Store.SetTaskDeps(ctx, created.ID, depIDs); err != nil {
+					return store.Task{}, err
+				}
+			}
 			e.notify(created.ID)
 			return created, nil
 		}
@@ -124,6 +160,12 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 }
 
 // SubmitBatch queues every task in a batch, returning what it created.
+//
+// Tasks are submitted in file order, so a depends_on may name a task earlier
+// in the same batch by the slug it will get — which, for a colliding goal, is
+// the suffixed one. Naming a task later in the batch fails: nothing has
+// created it yet, and guessing its slug ahead of the collision suffix would
+// only be right some of the time.
 func (e *Engine) SubmitBatch(ctx context.Context, b Batch) ([]store.Task, error) {
 	var out []store.Task
 	for i, bt := range b.Tasks {
@@ -185,6 +227,68 @@ func (e *Engine) Abandon(ctx context.Context, taskID int64) error {
 		task.ErrMsg = "abandoned by the operator"
 	}
 	if err := e.Store.SaveTask(ctx, task); err != nil {
+		return err
+	}
+	e.notify(taskID)
+	return nil
+}
+
+// RaiseCap sets a task's advisory spend ceiling. The dashboard offers this
+// beside the budget banner, so an operator who has decided the task is worth
+// finishing can clear the warning without editing the task file.
+func (e *Engine) RaiseCap(ctx context.Context, taskID int64, cap float64) error {
+	if cap < 0 {
+		return fmt.Errorf("cost cap %.2f must not be negative", cap)
+	}
+	task, err := e.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	task.CostCapUSD = cap
+	if err := e.Store.SaveTask(ctx, task); err != nil {
+		return err
+	}
+	e.notify(taskID)
+	return nil
+}
+
+// SetBlockingSeverity raises or lowers a task's blocking threshold.
+//
+// This is the answer to a task ping-ponging on nits: the dashboard shows the
+// recurring fingerprint and offers the threshold change that would let the
+// task converge, instead of leaving the operator to abandon it or watch it
+// spend another ten iterations.
+func (e *Engine) SetBlockingSeverity(ctx context.Context, taskID int64, severity string) error {
+	valid := false
+	for _, s := range config.ValidSeverities {
+		if severity == s {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return fmt.Errorf("blocking_severity %q must be one of %v", severity, config.ValidSeverities)
+	}
+	task, err := e.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	task.BlockingSeverity = severity
+	if err := e.Store.SaveTask(ctx, task); err != nil {
+		return err
+	}
+	e.notify(taskID)
+	return nil
+}
+
+// ReleaseDeps clears a task's dependencies so it can be claimed immediately.
+// A dependency that failed would otherwise hold its dependents forever, and
+// the operator is the one who decides whether that still matters.
+func (e *Engine) ReleaseDeps(ctx context.Context, taskID int64) error {
+	if _, err := e.Store.GetTask(ctx, taskID); err != nil {
+		return err
+	}
+	if err := e.Store.SetTaskDeps(ctx, taskID, nil); err != nil {
 		return err
 	}
 	e.notify(taskID)

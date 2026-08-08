@@ -30,6 +30,20 @@ type Config struct {
 	// which leaves convergence meaning only that Codex stopped objecting.
 	VerifyCommand string `yaml:"verify_command"`
 
+	// RunCapUSD and TaskCapUSD are advisory spend ceilings for the whole run
+	// and for one task. Passing either raises a banner on the dashboard and
+	// changes nothing else: overseer will not kill an agent mid-edit, because
+	// that abandons the worktree in a state nobody chose and throws away the
+	// money already spent getting there. Zero means no cap.
+	RunCapUSD  float64 `yaml:"run_cap_usd"`
+	TaskCapUSD float64 `yaml:"task_cap_usd"`
+
+	// AnalysisModel drives the repository analysis behind the dashboard's
+	// wizard. It is a separate knob from whatever model runs the loop: the
+	// analysis reads a repository once and writes nothing, so it is worth
+	// spending less on than the turns that produce the actual change.
+	AnalysisModel string `yaml:"analysis_model"`
+
 	// Sandbox is auto, bwrap or off. auto uses bwrap when it works and
 	// warns loudly when it does not.
 	Sandbox  string `yaml:"sandbox"`
@@ -73,6 +87,7 @@ func Default() Config {
 		GhBin:            "gh",
 		Sandbox:          "auto",
 		BwrapBin:         "bwrap",
+		AnalysisModel:    "claude-sonnet-5",
 		// These cover the common toolchains; a path that does not exist is
 		// skipped, so listing several is harmless.
 		//
@@ -131,6 +146,13 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("sandbox %q must be auto, bwrap or off", c.Sandbox)
 	}
+
+	if c.RunCapUSD < 0 {
+		return fmt.Errorf("run_cap_usd %.2f must not be negative", c.RunCapUSD)
+	}
+	if c.TaskCapUSD < 0 {
+		return fmt.Errorf("task_cap_usd %.2f must not be negative", c.TaskCapUSD)
+	}
 	return nil
 }
 
@@ -142,3 +164,10 @@ func (c Config) DBPath() string { return filepath.Join(c.DataDir, "overseer.db")
 
 // WorktreesDir is where task worktrees are created.
 func (c Config) WorktreesDir() string { return filepath.Join(c.DataDir, "worktrees") }
+
+// ProposalsDir is where a repository analysis writes its transcript and the
+// per-run agent state that stands in for the agent's real one.
+func (c Config) ProposalsDir() string { return filepath.Join(c.DataDir, "proposals") }
+
+// ImportsDir is where a repository cloned from a URL lands.
+func (c Config) ImportsDir() string { return filepath.Join(c.DataDir, "imported") }

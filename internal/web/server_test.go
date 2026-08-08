@@ -63,17 +63,21 @@ func initRepo(t *testing.T) string {
 	return dir
 }
 
-func TestBadge(t *testing.T) {
+func TestToneSeparatesTheThreeThingsAnOperatorCaresAbout(t *testing.T) {
+	// The board does not colour by state; it answers "is anything asking for
+	// me", so every state has to land in one of three weights.
 	cases := map[string]string{
-		"done":      "green",
-		"failed":    "red",
-		"escalated": "amber",
-		"planning":  "blue",
-		"queued":    "grey",
+		"done":        ToneMuted,
+		"queued":      ToneMuted,
+		"failed":      ToneAlert,
+		"escalated":   ToneAlert,
+		"planning":    ToneLive,
+		"plan_review": ToneLive,
+		"verifying":   ToneLive,
 	}
 	for state, want := range cases {
-		if got := Badge(state); got != want {
-			t.Errorf("Badge(%q) = %q, want %q", state, got, want)
+		if got := Tone(state); got != want {
+			t.Errorf("Tone(%q) = %q, want %q", state, got, want)
 		}
 	}
 }

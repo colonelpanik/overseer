@@ -8,13 +8,14 @@ import (
 	"html/template"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"overseer/internal/config"
 	"overseer/internal/engine"
 	"overseer/internal/store"
 )
 
-//go:embed templates/*.html
+//go:embed templates/*.html templates/*.css
 var templateFS embed.FS
 
 // Server serves the dashboard.
@@ -22,7 +23,8 @@ type Server struct {
 	cfg   config.Config
 	store *store.Store
 	eng   *engine.Engine
-	tpl   map[string]*template.Template
+	tpl   *template.Template
+	css   []byte
 	hub   *Hub
 }
 
@@ -30,16 +32,30 @@ type Server struct {
 // engine's change hook.
 func New(cfg config.Config, st *store.Store, eng *engine.Engine) *Server {
 	s := &Server{cfg: cfg, store: st, eng: eng, hub: NewHub()}
-	s.tpl = map[string]*template.Template{
-		"board": mustParse("board.html"),
-		"task":  mustParse("task.html"),
+	s.tpl = template.Must(template.New("dashboard").
+		Funcs(templateFuncs()).
+		ParseFS(templateFS, "templates/dashboard.html"))
+	css, err := templateFS.ReadFile("templates/style.css")
+	if err != nil {
+		panic("web: stylesheet missing from the embedded templates: " + err.Error())
 	}
+	s.css = css
 	eng.OnChange = func(taskID int64) { s.hub.Broadcast(taskID) }
 	return s
 }
 
-func mustParse(page string) *template.Template {
-	return template.Must(template.ParseFS(templateFS, "templates/layout.html", "templates/"+page))
+func templateFuncs() template.FuncMap {
+	return template.FuncMap{
+		// px turns a bar height into a CSS length. Doing the arithmetic in Go
+		// and the unit here keeps the template free of string concatenation.
+		"px": func(n int) template.CSS { return template.CSS(strconv.Itoa(n) + "px") },
+		"join": func(sep string, parts []string) string {
+			return strings.Join(parts, sep)
+		},
+		// The wizard's "not created yet" id, so the template names the
+		// constant rather than repeating a bare -1.
+		"wizardNew": func() int64 { return WizardNew },
+	}
 }
 
 // ListenAndServe runs the HTTP server until ctx is cancelled.
@@ -60,10 +76,21 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /", s.handleBoard)
 	mux.HandleFunc("GET /task/{id}", s.handleTask)
 	mux.HandleFunc("GET /events", s.handleEvents)
+	mux.HandleFunc("GET /style.css", s.handleCSS)
 	mux.HandleFunc("POST /tasks", s.requireSameOrigin(s.handleCreateTask))
+	mux.HandleFunc("POST /tasks/bulk", s.requireSameOrigin(s.handleBulk))
 	mux.HandleFunc("POST /task/{id}/continue", s.requireSameOrigin(s.handleContinue))
 	mux.HandleFunc("POST /task/{id}/abandon", s.requireSameOrigin(s.handleAbandon))
+	mux.HandleFunc("POST /task/{id}/severity", s.requireSameOrigin(s.handleSeverity))
+	mux.HandleFunc("POST /task/{id}/cap", s.requireSameOrigin(s.handleCap))
+	mux.HandleFunc("POST /task/{id}/release", s.requireSameOrigin(s.handleRelease))
 	mux.HandleFunc("POST /resume", s.requireSameOrigin(s.handleResume))
+	mux.HandleFunc("POST /analyse", s.requireSameOrigin(s.handleAnalyse))
+	mux.HandleFunc("POST /analyse/{id}/focus", s.requireSameOrigin(s.handleAnalyseFocus))
+	mux.HandleFunc("POST /analyse/{id}/regenerate", s.requireSameOrigin(s.handleAnalyseRegenerate))
+	mux.HandleFunc("POST /analyse/{id}/task/{taskID}", s.requireSameOrigin(s.handleAnalyseTask))
+	mux.HandleFunc("POST /analyse/{id}/queue", s.requireSameOrigin(s.handleAnalyseQueue))
+	mux.HandleFunc("POST /analyse/{id}/discard", s.requireSameOrigin(s.handleAnalyseDiscard))
 	mux.HandleFunc("GET /task/{id}/transcript/{stepID}", s.handleTranscript)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok\n"))
@@ -71,36 +98,25 @@ func (s *Server) routes() http.Handler {
 	return mux
 }
 
+func (s *Server) handleCSS(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	// The sheet is compiled into the binary, so it only ever changes when the
+	// daemon does; a long cache saves a round trip on every SSE reload.
+	w.Header().Set("Cache-Control", "max-age=3600")
+	w.Write(s.css)
+}
+
 func (s *Server) handleBoard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
-	tasks, err := s.store.ListTasks(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	view := BoardView{
-		Title:       "board",
-		PauseReason: s.eng.PauseReason(),
-		SandboxNote: s.eng.SandboxNote,
-	}
-	for _, t := range tasks {
-		totals, err := s.store.TaskTotals(r.Context(), t.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		view.Tasks = append(view.Tasks, TaskCard{
-			Task: t, Totals: totals, Badge: Badge(t.State),
-			Progress: Progress(t), Elapsed: elapsed(t),
-		})
-	}
-	s.render(w, "board", view)
+	s.renderDashboard(w, r, ParseQuery(r))
 }
 
+// handleTask is the deep link into one task. The board and the detail are the
+// same page, so this is the same render with the selection forced — which
+// keeps every /task/{id} link, bookmark and redirect from the CLI working.
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -112,46 +128,22 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	totals, err := s.store.TaskTotals(r.Context(), id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	q := ParseQuery(r)
+	q.Sel = id
+	if !r.URL.Query().Has("tab") {
+		q.Tab = defaultTab(task)
 	}
-	steps, err := s.store.ListSteps(r.Context(), id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	view := TaskView{
-		Title: task.Slug, Task: task, Totals: totals,
-		Badge: Badge(task.State), Progress: Progress(task),
-		TakeOver: s.eng.TakeOverHint(task), PauseReason: s.eng.PauseReason(),
-	}
-	for _, step := range steps {
-		findings, err := s.store.ListFindings(r.Context(), step.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		var blocking []store.Finding
-		for _, f := range findings {
-			if f.Blocking {
-				blocking = append(blocking, f)
-			} else {
-				view.PunchList = append(view.PunchList, f)
-			}
-		}
-		view.Timeline = append(view.Timeline, TimelineEntry{
-			Step: step, Findings: blocking, Duration: stepDuration(step),
-		})
-	}
-	s.render(w, "task", view)
+	s.renderDashboard(w, r, q)
 }
 
-func (s *Server) render(w http.ResponseWriter, page string, data any) {
+func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, q Query) {
+	view, err := s.build(r.Context(), q)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tpl[page].ExecuteTemplate(w, "layout", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err := s.tpl.ExecuteTemplate(w, "dashboard.html", view); err != nil {
+		writeError(w, err)
 	}
 }
