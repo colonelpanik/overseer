@@ -82,3 +82,35 @@ func TestLoadRejectsUnknownSandboxMode(t *testing.T) {
 		t.Fatal("expected an error for an unknown sandbox mode")
 	}
 }
+
+func TestAnalysisTimeoutIsConfigurableAndNotStricterThanAStep(t *testing.T) {
+	// It was a hardcoded 15 minutes — shorter than the timeout a coding turn
+	// gets — which failed on exactly the large unfamiliar repository the
+	// wizard exists for, with no knob to turn.
+	d := Default()
+	if d.AnalysisTimeout < d.StepTimeout {
+		t.Errorf("analysis_timeout %s is stricter than step_timeout %s",
+			d.AnalysisTimeout, d.StepTimeout)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("analysis_timeout: 90m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AnalysisTimeout != 90*time.Minute {
+		t.Errorf("AnalysisTimeout = %s, want 90m", c.AnalysisTimeout)
+	}
+
+	// Zero would mean "no time at all" to the runner, so it is refused rather
+	// than silently treated as a default.
+	if err := os.WriteFile(path, []byte("analysis_timeout: 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Error("a zero analysis_timeout should be refused")
+	}
+}

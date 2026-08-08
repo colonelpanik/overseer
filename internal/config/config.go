@@ -15,11 +15,16 @@ import (
 // `overseer submit` carry tasks only, never these values, so submitting a
 // second batch cannot change the concurrency of a run already in flight.
 type Config struct {
-	ListenAddr       string        `yaml:"listen_addr"`
-	DataDir          string        `yaml:"data_dir"`
-	MaxParallel      int           `yaml:"max_parallel"`
-	MaxIterations    int           `yaml:"max_iterations"`
-	StepTimeout      time.Duration `yaml:"step_timeout"`
+	ListenAddr    string        `yaml:"listen_addr"`
+	DataDir       string        `yaml:"data_dir"`
+	MaxParallel   int           `yaml:"max_parallel"`
+	MaxIterations int           `yaml:"max_iterations"`
+	StepTimeout   time.Duration `yaml:"step_timeout"`
+	// AnalysisTimeout bounds one repository analysis. A big or unfamiliar
+	// repository is exactly the case the wizard exists for, and exactly the
+	// case that takes longest to read, so this is not held below the per-step
+	// timeout a coding turn gets.
+	AnalysisTimeout  time.Duration `yaml:"analysis_timeout"`
 	BlockingSeverity string        `yaml:"blocking_severity"`
 	ClaudeBin        string        `yaml:"claude_bin"`
 	CodexBin         string        `yaml:"codex_bin"`
@@ -88,6 +93,7 @@ func Default() Config {
 		MaxParallel:      3,
 		MaxIterations:    10,
 		StepTimeout:      30 * time.Minute,
+		AnalysisTimeout:  30 * time.Minute,
 		BlockingSeverity: "any",
 		ClaudeBin:        "claude",
 		CodexBin:         "codex",
@@ -184,6 +190,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("sandbox %q must be auto, bwrap or off", c.Sandbox)
 	}
 
+	if c.StepTimeout <= 0 {
+		return fmt.Errorf("step_timeout must be positive, got %s", c.StepTimeout)
+	}
+	if c.AnalysisTimeout <= 0 {
+		return fmt.Errorf("analysis_timeout must be positive, got %s", c.AnalysisTimeout)
+	}
 	if c.RunCapUSD < 0 {
 		return fmt.Errorf("run_cap_usd %.2f must not be negative", c.RunCapUSD)
 	}

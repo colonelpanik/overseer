@@ -17,11 +17,19 @@ import (
 	"overseer/internal/worktree"
 )
 
-// analysisTimeout bounds one analysis run. It is deliberately shorter than a
-// task's step timeout: reading a repository and writing a list is not
-// open-ended work, and an analysis that has been going half an hour has gone
-// wrong rather than deep.
-const analysisTimeout = 15 * time.Minute
+// analysisTimeout is how long one analysis may run, from config.
+//
+// It used to be a hardcoded fifteen minutes, on the reasoning that reading a
+// repository and writing a list is not open-ended work. That was wrong in the
+// case the wizard is most for: a large repository nobody knows well is both
+// the best reason to run an analysis and the slowest thing to read, and the
+// timeout landed as a bare "step timeout after 15m0s" with no knob to turn.
+func (e *Engine) analysisTimeout() time.Duration {
+	if e.Cfg.AnalysisTimeout > 0 {
+		return e.Cfg.AnalysisTimeout
+	}
+	return 30 * time.Minute
+}
 
 // StartProposal opens a wizard against a local repository path. The path is
 // validated the same way a submitted task's repository is, so the wizard
@@ -246,6 +254,16 @@ func (e *Engine) runAnalysis(ctx context.Context, p *store.Proposal, prompt stri
 			if agent.IsAuthFailure(res.ErrMsg) {
 				e.Pause(fmt.Sprintf("claude is not authenticated: %s", res.ErrMsg))
 			}
+			// A timeout is the one failure the operator can act on directly,
+			// and "step timeout after 30m0s" on its own does not say there is
+			// a setting behind it.
+			if strings.Contains(res.ErrMsg, "step timeout") {
+				return nil, spent, fmt.Errorf(
+					"the analysis ran past its %s limit and was stopped. "+
+						"Raise analysis_timeout in the config file, or narrow the "+
+						"focus and the task budget so there is less to read: %s",
+					e.analysisTimeout(), res.ErrMsg)
+			}
 			return nil, spent, fmt.Errorf("analysis failed: %s", res.ErrMsg)
 		}
 
@@ -296,7 +314,7 @@ func (e *Engine) runAnalysisAgent(ctx context.Context, p *store.Proposal, prompt
 		Args:           role.args(prompt, "", "", ""),
 		Dir:            p.RepoPath,
 		TranscriptPath: transcript,
-		Timeout:        analysisTimeout,
+		Timeout:        e.analysisTimeout(),
 		Attempt:        attempt,
 		Sandbox:        e.Sandbox,
 		SandboxSpec:    e.analysisSandboxSpec(p.RepoPath, runDir, role.Agent),

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"overseer/internal/agent"
 	"overseer/internal/store"
@@ -326,5 +327,47 @@ func TestProgressNotifierThrottles(t *testing.T) {
 	}
 	if got := n.Load(); got != 1 {
 		t.Errorf("notifications = %d for 500 events in a burst, want 1", got)
+	}
+}
+
+func TestAnalysisTimeoutSaysWhatToDoAboutIt(t *testing.T) {
+	// The reported failure was a bare "step timeout after 15m0s", which does
+	// not say there is a setting behind it or that the limit was overseer's
+	// choice rather than the agent's.
+	slow := writeScript(t, "claude", "sleep 5\n")
+	h := newHarness(t, slow, "true")
+	h.eng.Cfg.AnalysisTimeout = 200 * time.Millisecond
+	ctx := context.Background()
+
+	p, err := h.eng.StartProposal(ctx, h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
+		t.Fatal(err)
+	}
+	done := waitForProposal(t, h, p.ID, store.ProposalFailed, store.ProposalReady)
+	if done.State != store.ProposalFailed {
+		t.Fatalf("state = %s, want failed", done.State)
+	}
+	for _, want := range []string{"analysis_timeout", "ran past its"} {
+		if !strings.Contains(done.ErrMsg, want) {
+			t.Errorf("message %q is missing %q", done.ErrMsg, want)
+		}
+	}
+	// And it is regenerable, so the operator can raise the limit and retry
+	// without starting the wizard again.
+	if err := h.eng.RegenerateProposal(ctx, p.ID, ""); err != nil {
+		t.Errorf("a timed-out analysis should be retryable: %v", err)
+	}
+}
+
+func TestAnalysisTimeoutDefaultsWhenUnset(t *testing.T) {
+	// A zero on the struct (a hand-built Config in a test, or an older
+	// caller) must not mean "no time at all".
+	h := newHarness(t, "true", "true")
+	h.eng.Cfg.AnalysisTimeout = 0
+	if got := h.eng.analysisTimeout(); got != 30*time.Minute {
+		t.Errorf("analysisTimeout() = %s, want the 30m fallback", got)
 	}
 }

@@ -63,6 +63,7 @@ data_dir: ~/.overseer
 max_parallel: 3          # tasks in flight at once
 max_iterations: 10       # per phase, then the task parks for a human
 step_timeout: 30m
+analysis_timeout: 30m    # how long one repo analysis may run
 blocking_severity: any   # any | minor | major | critical
 sandbox: auto            # auto | bwrap | off
 bwrap_bin: bwrap
@@ -158,6 +159,15 @@ closing the tab does not lose the only link to it.
 
 An analysis that a daemon restart interrupted is parked as failed with that
 reason, rather than showing a spinner forever.
+
+**If an analysis runs out of time**, `analysis_timeout` (default 30m) is the
+knob, and the failure says so rather than leaving you with a bare timeout. A
+large repository is both the best reason to run an analysis and the slowest
+thing to read, so raise it — or narrow the focus and the task budget so there
+is less to get through. Nothing partial survives a timeout: the task list
+arrives as the agent's final message, so a run that never got there has nothing
+to salvage. **Regenerate** on the failed analysis retries without restarting
+the wizard.
 
 Three things are true of the analysis and worth knowing:
 
