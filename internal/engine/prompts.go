@@ -192,3 +192,144 @@ explicitly and explain why rather than silently ignoring it — the reviewer
 will see this round again.`, target)
 	return b.String()
 }
+
+// ArchitectPrompt opens the design conversation.
+//
+// The one prompt in this file that is not asking for a finished artefact. It
+// asks for a collaborator: something that pushes back, asks what it actually
+// needs to know, and says what it would do — because the operator is sitting
+// there, and the whole value of the conversation is the turns where they
+// disagree.
+//
+// It is deliberately told not to produce the task list yet. A model asked to
+// design and to decompose at once does both worse, and the operator has not
+// agreed to anything yet.
+func ArchitectPrompt(brief string, existing bool) string {
+	var b strings.Builder
+	b.WriteString("You are helping a developer design something, in conversation. " +
+		"They are reading your replies and will answer.\n\n")
+
+	if existing {
+		b.WriteString(`You are in an existing repository, mounted READ-ONLY. Read whatever you
+need — the README, the build manifest, the parts of the tree this would touch.
+You cannot edit, commit or run anything that writes, and should not try.
+
+Ground what you say in what is actually there. "This would go in
+internal/store, beside the other repo_*.go files" is worth ten sentences of
+architecture.
+
+`)
+	} else {
+		b.WriteString(`There is no code yet. This is a new project, and this conversation decides
+what it is.
+
+`)
+	}
+
+	b.WriteString("WHAT THEY WANT:\n")
+	b.WriteString(strings.TrimSpace(brief))
+	b.WriteString("\n\n")
+
+	b.WriteString(`How to be useful here:
+
+- Ask about the things that actually change the design, and ask them early.
+  Two or three real questions beat a checklist. If something is genuinely
+  ambiguous and the answer would change the shape, ask; if you can pick a
+  sensible default and say you picked it, do that instead.
+- Say what you would build, concretely. Name the pieces, what each one is
+  responsible for, and where the boundaries are.
+- Disagree when you disagree. If what they asked for has a problem — it will
+  not scale, it duplicates something, it is three projects — say so plainly
+  and say what you would do instead. Agreeing with everything makes this
+  conversation worthless.
+- Keep it short enough to read. This is a conversation, not a document.
+
+Do not produce a task list or a plan document yet. You will be asked for both
+when they are happy with the design. Reply in prose.`)
+	return b.String()
+}
+
+// ArchitectAcceptPrompt ends the conversation and asks for both artefacts.
+//
+// It comes as a turn in the same session, so everything already agreed is
+// context rather than something to restate. The task list goes through the
+// same parser and the same rules as an analysis's, because it reaches the same
+// scheduler and spends the same money.
+func ArchitectAcceptPrompt(existing bool, maxTasks int) string {
+	var b strings.Builder
+	b.WriteString(`The developer is happy with the design. Write it down and break it into
+work.
+
+Reply with a single JSON object and nothing else — no prose before it, no
+explanation after it, no markdown fence:
+
+{
+  "design": "<the design, as a markdown document>",
+  "tasks": [ ... ]
+}
+
+"design" is what we agreed, written for someone who was not part of this
+conversation: what this is, the shape of it, the decisions that were actually
+decided and why, and anything ruled out on purpose. It becomes DESIGN.md and
+every task is judged against it. Do not include a task list in it.
+
+`)
+	fmt.Fprintf(&b, `"tasks" is at most %d items. Each one must be:
+
+- ONE self-contained change an agent can finish and a reviewer can judge. Not a
+  theme, not "the storage layer". If you cannot describe the diff you expect,
+  it is not a task.
+- Ordered by "depends_on", naming the "key" of a task EARLIER in the array.
+  Never name a later task and never form a cycle.
+`, maxTasks)
+
+	if existing {
+		b.WriteString(`- Grounded in this repository. Put its conventions in "constraints", set
+  "verify" to the test command that actually exists here, and cite what you
+  read in "evidence".
+`)
+	} else {
+		b.WriteString(`- Written for a project that does not exist yet. The first task is the
+  scaffold everything else assumes; every other task should depend on it,
+  directly or through another. Put the stack and the conventions you chose in
+  "constraints", so each task builds the same thing. "evidence" may be empty:
+  there is nothing to cite yet. Set "verify" to the command the scaffold will
+  make work.
+`)
+	}
+
+	b.WriteString(`
+Set "blocking_severity" to how strict the review loop should be: "any" by
+default, "major" where style nits would waste iterations.
+
+`)
+	b.WriteString(strings.TrimSpace(string(agent.ProposalSchema)))
+	b.WriteString("\n\nThat schema describes the \"tasks\" array. Wrap it in the object above.")
+	return b.String()
+}
+
+// ScaffoldPrompt turns an agreed design into a project's first commit.
+//
+// The one agent turn that writes outside a worktree, and the only one that is
+// not reviewed — which is why it is scoped this narrowly. It builds the thing
+// every later task assumes and nothing more; the features are tasks, and they
+// get the full loop.
+func ScaffoldPrompt(design string) string {
+	return fmt.Sprintf(`Scaffold this project. The design was agreed with the developer:
+
+%s
+
+Create the skeleton every later piece of work will assume:
+
+- The directory layout, and the package or module manifest.
+- Enough of an entry point to build and run, doing nothing useful yet.
+- A test command that works and passes — even with one trivial test. Later
+  work is gated on it, so a scaffold whose tests do not run blocks everything.
+- A README saying what this is and how to build, test and run it.
+
+Do NOT implement the features. They are separate pieces of work, each planned
+and reviewed on its own branch; building them here would put them outside that.
+Stop at the point where someone could clone this and start.
+
+Do not commit; that is handled for you.`, strings.TrimSpace(design))
+}

@@ -118,35 +118,47 @@ func ParseProposal(b []byte, max int) ([]ProposedTask, error) {
 	if w.Tasks == nil {
 		return nil, errors.New(`parse proposal: missing "tasks"`)
 	}
-	tasks := *w.Tasks
+	if err := ValidateProposedTasks(*w.Tasks, max); err != nil {
+		return nil, err
+	}
+	return *w.Tasks, nil
+}
+
+// ValidateProposedTasks is the shared check behind every response that carries
+// a task list, whether it came from reading a repository or from designing one.
+//
+// Every deviation is an error rather than a lenient default, for the same
+// reason ParseVerdict is strict: what comes back drives money being spent
+// without a further human decision on each item.
+func ValidateProposedTasks(tasks []ProposedTask, max int) error {
 	if len(tasks) == 0 {
-		return nil, errors.New("parse proposal: no tasks proposed")
+		return errors.New("parse proposal: no tasks proposed")
 	}
 	if max > 0 && len(tasks) > max {
-		return nil, fmt.Errorf("parse proposal: %d tasks proposed, the brief allowed %d",
+		return fmt.Errorf("parse proposal: %d tasks proposed, the brief allowed %d",
 			len(tasks), max)
 	}
 
 	seen := make(map[string]bool, len(tasks))
 	for i, t := range tasks {
 		if t.Key == nil || strings.TrimSpace(*t.Key) == "" {
-			return nil, fmt.Errorf("parse proposal: task %d has no key", i)
+			return fmt.Errorf("parse proposal: task %d has no key", i)
 		}
 		key := strings.TrimSpace(*t.Key)
 		// Duplicate keys would make depends_on ambiguous, and the wizard
 		// resolves dependencies by key.
 		if seen[key] {
-			return nil, fmt.Errorf("parse proposal: duplicate key %q", key)
+			return fmt.Errorf("parse proposal: duplicate key %q", key)
 		}
 		if t.Goal == nil || strings.TrimSpace(*t.Goal) == "" {
-			return nil, fmt.Errorf("parse proposal: task %q has an empty goal", key)
+			return fmt.Errorf("parse proposal: task %q has an empty goal", key)
 		}
 		if t.Severity != nil && !validSeverities[*t.Severity] {
-			return nil, fmt.Errorf("parse proposal: task %q has unknown blocking_severity %q",
+			return fmt.Errorf("parse proposal: task %q has unknown blocking_severity %q",
 				key, *t.Severity)
 		}
 		if cap := t.CostCapOrZero(); cap < 0 {
-			return nil, fmt.Errorf("parse proposal: task %q has a negative cost_cap", key)
+			return fmt.Errorf("parse proposal: task %q has a negative cost_cap", key)
 		}
 		// Dependencies may only point backwards. That rejects both a forward
 		// reference and every cycle before any of this reaches the scheduler,
@@ -155,14 +167,56 @@ func ParseProposal(b []byte, max int) ([]ProposedTask, error) {
 		for _, dep := range t.DependsOn {
 			dep = strings.TrimSpace(dep)
 			if dep == key {
-				return nil, fmt.Errorf("parse proposal: task %q depends on itself", key)
+				return fmt.Errorf("parse proposal: task %q depends on itself", key)
 			}
 			if !seen[dep] {
-				return nil, fmt.Errorf("parse proposal: task %q depends on %q, which is not an earlier task",
+				return fmt.Errorf("parse proposal: task %q depends on %q, which is not an earlier task",
 					key, dep)
 			}
 		}
 		seen[key] = true
 	}
-	return tasks, nil
+	return nil
+}
+
+// designWire is the architect's final answer: the design the conversation
+// arrived at, and the tasks that build it.
+type designWire struct {
+	Design *string         `json:"design"`
+	Tasks  *[]ProposedTask `json:"tasks"`
+}
+
+// ParseDesign decodes the architect's accept response.
+//
+// Same posture as ParseProposal, and the same validation over the task list —
+// this is the other door into the same room, so a task list that would be
+// rejected coming from an analysis must be rejected coming from a design.
+//
+// The design document is required and must not be empty. An architect that
+// proposes tasks without stating what it decided has produced something nobody
+// can review, which is the one thing this whole conversation exists to avoid.
+func ParseDesign(b []byte, max int) (string, []ProposedTask, error) {
+	body := stripFence(strings.TrimSpace(string(b)))
+
+	var w designWire
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&w); err != nil {
+		return "", nil, fmt.Errorf("parse design: %w", err)
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return "", nil, errors.New("parse design: unexpected data after the JSON object")
+	}
+
+	if w.Design == nil || strings.TrimSpace(*w.Design) == "" {
+		return "", nil, errors.New(`parse design: missing "design"`)
+	}
+	if w.Tasks == nil {
+		return "", nil, errors.New(`parse design: missing "tasks"`)
+	}
+	if err := ValidateProposedTasks(*w.Tasks, max); err != nil {
+		return "", nil, err
+	}
+	return strings.TrimSpace(*w.Design), *w.Tasks, nil
 }
