@@ -457,7 +457,7 @@ Both agents run inside a [bubblewrap](https://github.com/containers/bubblewrap) 
 | Real agent config, plugins, credentials | **ro**, layered on top | Read for auth and settings, never writable. |
 | `~/.claude.json` | rw, but a **per-task copy** | It carries top-level `mcpServers` — executable configuration that must not persist. |
 | Agent binary directories | ro | Both CLIs install as symlinks into versioned directories under `$HOME`. |
-| `<runs>/<slug>` | rw | Codex writes `--output-last-message` itself. |
+| `<verdicts>/<slug>` | rw for **Codex only** | Codex writes `--output-last-message` itself. Kept out of the run directory and away from Claude: a verdict the implementing agent can write is a verdict it can forge. |
 | Verdict schema file | ro | Codex reads `--output-schema` itself. |
 | Toolchain caches (`GOCACHE`, `GOMODCACHE`, …) | rw | Derived data. Without them a `$HOME` tmpfs forces a cold build and a full dependency re-download every turn. |
 | `/usr`, `/etc`, `/run/systemd/resolve` | ro | The system, and DNS. |
@@ -483,8 +483,12 @@ until an operator opts in via `sandbox_extra_read_only`, which is the right defa
 alternative is handing credentials to an unattended agent.
 
 Everything else is absent: other repositories, dotfiles, `~/.ssh`, and overseer's own
-database. The data directory is never mounted whole, only the current task's run
-directory, so an agent cannot rewrite task state.
+database. The data directory is never mounted whole. Claude gets no part of it beyond
+its own per-task agent-state directories, which are bound to their `$HOME`
+destinations rather than exposed at their real paths; Codex additionally gets
+the task's verdict directory, because it writes its own last-message file. An
+agent cannot rewrite task state, and the agent under review cannot write the
+reviewer's verdict.
 
 Three constraints were found by running real agents inside candidate profiles rather than
 by reasoning about them:

@@ -2074,3 +2074,78 @@ Run these before calling this change done. There is no compiler here; these are 
 - [ ] The plan and the spec agree on the sandbox mount table. Diff the spec's table against `sandboxSpec` mount by mount; the verdict-directory row is the one this change moves.
 - [ ] `testdata/*.jsonl` is byte-identical to `master`, and each line still parses as JSON.
 - [ ] No task in the plan references a `Task N` number that this change renumbered — nothing was renumbered, so this is a check that it stayed that way.
+
+---
+
+## Deviations from this plan
+
+All thirteen defects were fixed as specified. Every "Prove the edits landed" grep returns
+its stated count except the two noted below, which the plan miscounted. The per-task
+`git commit` steps were skipped: this run's harness commits the work itself.
+
+**1. There *is* a compiler here.** The preamble says "There is nothing to run. `go test`
+does not exist here." In fact `go1.26.0` is installed at `/usr/bin/go`. That changed the
+evidence available, so rather than take the plan's recorded outputs on faith I re-ran them
+in scratch modules under `/tmp` (never in this repo — the two-files-only constraint holds):
+
+- **Task 4's classifiers.** Ran the old and new `IsRetryable`/`IsAuthFailure` over the
+  plan's exact existing tables plus the six new adversarial cases. Result: 0 failures for
+  the new implementations; every pre-existing case keeps its classification. As claimed.
+- **Task 5's normalisation.** Ran old and new `NormalizeFailureOutput` against all four
+  pre-existing assertions and the three new tests. The old implementation fails 6 of the
+  new assertions and passes every old one; the new implementation passes all of both. The
+  outputs recorded in Task 5 (`-> ["main.go:N:N: undefined: foo"]`, the `make` cases, the
+  `[]` for compile errors under the old regex) reproduce exactly.
+- **Task 10 Step 2's yaml claim.** Confirmed against `gopkg.in/yaml.v3 v3.0.1`:
+  `step_timeout: 5m` decodes to `5m0s`, and `time.Duration` does *not* implement
+  `encoding.TextUnmarshaler`. The plan's original rationale was indeed wrong, and the
+  replacement sentence is accurate.
+- **Task 10 Step 5's probe.** `bwrap` 0.11.1 is present and the probe fails here exactly as
+  the preamble describes, confirming the empirical caveat. The checklist text was adjusted
+  to quote `Probe`'s real argv, which has no `--` separator before `/bin/true`.
+
+**2. Two extra compile-blocking defects found and fixed (extends Task 1).** Extracting all
+99 embedded ```go blocks and running `gofmt -e` over the 52 that are whole files surfaced
+two genuine Go syntax errors that Task 1 missed — both present on `master`, one of them in
+`internal/sandbox/sandbox_test.go`, the very file Task 1 Step 2 edits:
+
+- `if Passthrough{}.Name() != "off" {` (Task 16 Step 1)
+- `if Verdict{}.Fingerprint("any") == "" {` (Task 5)
+
+A composite literal directly in an `if` condition does not parse — the parser reads the `{`
+as the start of the if body. Both are now parenthesised (`if (Passthrough{}).Name()`) with a
+comment saying why. All 52 blocks now parse; the 47 partial snippets were checked too, and
+their only diagnostics are artifacts of wrapping bare struct fields and `case` arms.
+
+**3. Task 7 Step 2 had a forward dependency; used `os.MkdirAll` instead.** The step directs
+`runCodex` (Task 10) to call `sandbox.EnsureDirs` and to import `overseer/internal/sandbox`.
+That package is created by Task 16, which runs *after* Task 10, so Task 10 would not
+compile. `EnsureDirs` is `os.MkdirAll` over a list, so `runCodex` now calls `os.MkdirAll`
+directly — same effect, no forward reference — with a comment recording why. Only `errors`
+was added to Task 10's `engine.go` imports, not `sandbox`. Task 16 Step 9 still adds the
+`sandbox` import and still extends its own `EnsureDirs` call to cover the verdict directory,
+exactly as Task 7 Step 4 specifies.
+
+**4. Task 2's two harness lines have the same forward dependency; documented rather than
+moved.** `cfg.Sandbox = "off"` names a field Task 16 adds, and
+`VerifyCommand: h.eng.Cfg.VerifyCommand` names fields Task 17 adds, yet both sit in Task 10
+and Task 12 snippets. Moving them would scatter the harness, so the lines stay where a
+reader looks for them and each snippet now carries a note naming the task that makes it
+compile. `TestHarnessSubmitCarriesTheVerifyCommand` (Task 17) is the guard if the second is
+forgotten.
+
+**5. Two of the plan's expected grep counts were wrong; the edits are correct.**
+
+- Task 1 Step 5 expects `grep -c '"encoding/json"'` to return 1. Four snippets already
+  imported it on `master`, so the correct post-edit count is **5**.
+- Task 10 Step 7 expects `grep -c 'CommonDir string'` to return 2. The pattern also matches
+  `GitCommonDir string`, which is a separate field; the correct post-edit count is **3**.
+
+**6. Two small additions in the plan's own voice, to keep it self-consistent.**
+
+- Task 16 Step 7 says to "extend `validate`" with a `switch c.Sandbox` block. Task 9
+  restructures `validate` to return early, so the step now states that the sandbox check
+  goes after the severity check and before the final `return nil` — appended to the end of
+  the old body it would have been unreachable.
+- Task 16 Step 9's prose explained why `runDir` no longer needs a mount; that explanation is
+  now a doc comment on `agentStateDir`, where a reader of the code will find it.
