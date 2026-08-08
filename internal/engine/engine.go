@@ -54,9 +54,16 @@ type Engine struct {
 	// layer can push an SSE update. It must not block.
 	OnChange func(taskID int64)
 
-	// running guards against two workers driving the same task.
+	// running maps a task ID to the control its worker is reachable through. A
+	// non-nil entry means a worker goroutine owns the task, between claim and
+	// release — so it is both the guard against two workers driving the same
+	// task and the channel an operator's stop reaches that worker through.
+	//
+	// One map, not two: a separate registry with the same key and the same
+	// lifetime could only ever disagree with this one, and the disagreement
+	// would be a task that is running but unstoppable.
 	mu      sync.Mutex
-	running map[int64]bool
+	running map[int64]*taskControl
 
 	// pauseReason is non-empty when the whole run is halted, which happens
 	// on an authentication failure: every task would fail identically.
@@ -100,8 +107,15 @@ func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.
 		SandboxNote:  note,
 		RetryBackoff: 5 * time.Second,
 		PollInterval: 2 * time.Second,
-		running:      map[int64]bool{},
+		running:      map[int64]*taskControl{},
 	}, nil
+}
+
+// logf reports something the operator should see but which is nobody's error
+// to return: a best-effort cleanup that did not land, or a task failure already
+// recorded in the database.
+func (e *Engine) logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "overseer: "+format+"\n", args...)
 }
 
 // maxConsecutiveClaimFailures bounds how many times in a row Run tolerates a
@@ -209,13 +223,17 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		consecutiveClaimFailures = 0
 		for _, t := range tasks {
-			if !e.claim(t.ID) {
+			taskCtx, ctrl, ok := e.claim(ctx, t.ID)
+			if !ok {
 				continue
 			}
 			wg.Add(1)
-			go func(id int64) {
+			// The goroutine closes over the task's own context, so the
+			// error-suppression below covers a hard stop as well as a shutdown:
+			// pressing Stop must not print "task 7: context canceled".
+			go func(id int64, ctx context.Context, ctrl *taskControl) {
 				defer wg.Done()
-				defer e.release(id)
+				defer e.release(id, ctrl)
 				select {
 				case sem <- struct{}{}:
 				case <-ctx.Done():
@@ -223,10 +241,10 @@ func (e *Engine) Run(ctx context.Context) error {
 				}
 				defer func() { <-sem }()
 
-				if err := e.RunTask(ctx, id); err != nil && ctx.Err() == nil {
+				if err := e.runTask(ctx, ctrl, id); err != nil && ctx.Err() == nil {
 					fmt.Fprintf(os.Stderr, "overseer: task %d: %v\n", id, err)
 				}
-			}(t.ID)
+			}(t.ID, taskCtx, ctrl)
 		}
 
 		select {
@@ -238,20 +256,31 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 }
 
-func (e *Engine) claim(id int64) bool {
+// claim registers id as owned by the caller and returns the task's own
+// context — a child of parent, cancelled by a hard stop — with the control an
+// operator's request reaches this worker through.
+func (e *Engine) claim(parent context.Context, id int64) (context.Context, *taskControl, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.running[id] {
-		return false
+	if e.running[id] != nil {
+		return nil, nil, false
 	}
-	e.running[id] = true
-	return true
+	ctx, cancel := context.WithCancel(parent)
+	ctrl := &taskControl{stop: make(chan struct{}), cancel: cancel}
+	e.running[id] = ctrl
+	return ctx, ctrl, true
 }
 
-func (e *Engine) release(id int64) {
+func (e *Engine) release(id int64, ctrl *taskControl) {
 	e.mu.Lock()
-	delete(e.running, id)
+	// Only evict our own entry. RunTask claims for itself when called directly,
+	// so a late release must not remove the control of a worker that claimed
+	// the same task afterwards.
+	if e.running[id] == ctrl {
+		delete(e.running, id)
+	}
 	e.mu.Unlock()
+	ctrl.cancel()
 }
 
 // isRunning reports whether a worker goroutine currently owns taskID, i.e.
@@ -259,11 +288,35 @@ func (e *Engine) release(id int64) {
 func (e *Engine) isRunning(id int64) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.running[id]
+	return e.running[id] != nil
 }
 
 // RunTask drives one task from its current state to a terminal state.
+//
+// It claims the task itself, so a direct caller is stoppable exactly like a
+// scheduled one, and returns nil without doing anything when another worker
+// already owns it.
 func (e *Engine) RunTask(ctx context.Context, taskID int64) error {
+	ctx, ctrl, ok := e.claim(ctx, taskID)
+	if !ok {
+		return nil
+	}
+	defer e.release(taskID, ctrl)
+	return e.runTask(ctx, ctrl, taskID)
+}
+
+// runTask is the body, for callers that have already claimed the task.
+func (e *Engine) runTask(ctx context.Context, ctrl *taskControl, taskID int64) error {
+	// The stop is checked before the pause, here and at every other boundary.
+	// The other way round, stopping a task while the run is globally paused
+	// returns early and drops the request on the floor with no record of it.
+	if req, ok := stopRequested(ctrl); ok {
+		task, err := e.Store.GetTask(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		return e.parkStopped(ctx, &task, req)
+	}
 	// Checked before the task is even loaded: a queued task must be left
 	// alone while the run is paused, not advanced into its first state
 	// transition only to be stopped at the dispatch guard below. The state
@@ -277,6 +330,12 @@ func (e *Engine) RunTask(ctx context.Context, taskID int64) error {
 	task, err := e.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
+	}
+	// A stop that landed between the scheduler's poll and this claim is
+	// invisible to the claim query, which was answered before it was written.
+	// This costs nothing: the row was just read anyway.
+	if task.Stopped() {
+		return nil
 	}
 
 	// After a restart the task may be parked mid-step. Re-dispatch what it
@@ -302,17 +361,20 @@ func (e *Engine) RunTask(ctx context.Context, taskID int64) error {
 				action.ResumeSessionID = ""
 			}
 		}
-		// The same two guards the main loop applies. Recovery is a dispatch
-		// like any other: another worker may have paused the run since this
-		// task's entry check, and a harness error here must be persisted or
-		// the task stays claimable and the scheduler repeats this exact
-		// action every poll.
+		// The same guards the main loop applies. Recovery is a dispatch like
+		// any other: another worker may have paused the run since this task's
+		// entry check, and a harness error here must be persisted or the task
+		// stays claimable and the scheduler repeats this exact action every
+		// poll.
+		if req, ok := stopRequested(ctrl); ok {
+			return e.parkStopped(ctx, &task, req)
+		}
 		if reason := e.PauseReason(); reason != "" {
 			return nil
 		}
 		outcome, err := e.dispatch(ctx, &task, action)
-		if err != nil {
-			return e.failTask(ctx, &task, err)
+		if done, err := e.afterDispatch(ctx, &task, ctrl, err); done {
+			return err
 		}
 		last = outcome
 	}
@@ -332,36 +394,72 @@ func (e *Engine) RunTask(ctx context.Context, taskID int64) error {
 			return nil
 		}
 
-		// Re-check the pause before every dispatch, not only on entry.
-		// Another worker may have hit an authentication failure while this
-		// task was mid-step, and with MaxParallel above 1 this task would
-		// otherwise keep dispatching doomed calls despite the advertised
-		// global pause. The task keeps its current state and resumes from
-		// its pending action once the operator clears the pause.
+		// Re-check the stop and the pause before every dispatch, not only on
+		// entry. For the pause: another worker may have hit an authentication
+		// failure while this task was mid-step, and with MaxParallel above 1
+		// this task would otherwise keep dispatching doomed calls despite the
+		// advertised global pause. The task keeps its current state and resumes
+		// from its pending action once the operator clears it.
+		if req, ok := stopRequested(ctrl); ok {
+			return e.parkStopped(ctx, &task, req)
+		}
 		if reason := e.PauseReason(); reason != "" {
 			return nil
 		}
 
 		outcome, err := e.dispatch(ctx, &task, action)
-		if err != nil {
-			// A genuine harness failure — an unwritable transcript, a
-			// database error — would otherwise leave the task in a
-			// non-terminal state that ClaimableTasks keeps returning, and
-			// the scheduler would retry it every poll forever.
-			return e.failTask(ctx, &task, err)
+		if done, err := e.afterDispatch(ctx, &task, ctrl, err); done {
+			return err
 		}
 		last = outcome
 	}
+}
+
+// afterDispatch decides what a completed dispatch means, before its outcome is
+// allowed anywhere near the state machine. It reports whether runTask should
+// return, and with what.
+//
+// The order matters and is the whole point. A stop lodged while the action was
+// in flight wins over whatever the action reported: a SIGKILLed agent is
+// indistinguishable from a failed one — the runner reports "signal: killed", or
+// whatever the agent printed just before it died — so feeding that outcome to
+// loop.Next would mark the task permanently failed for having been stopped on
+// purpose. The same applies to err: a store write with the cancelled context
+// fails, dispatch reports that as a harness error, and failTask would turn it
+// into the same wrong terminal state.
+func (e *Engine) afterDispatch(ctx context.Context, task *store.Task, ctrl *taskControl, err error) (bool, error) {
+	if req, ok := stopRequested(ctrl); ok {
+		return true, e.parkStopped(ctx, task, req)
+	}
+	// No request, but the context is dead: the daemon is shutting down. The
+	// only other thing that cancels this context is a hard stop, and that
+	// always closes ctrl.stop first, so the case above has already caught it.
+	// Leave the task exactly as it is — the next daemon's loop.Pending
+	// re-dispatches the action its state names.
+	if ctx.Err() != nil {
+		return true, ctx.Err()
+	}
+	if err != nil {
+		// A genuine harness failure — an unwritable transcript, a database
+		// error — would otherwise leave the task in a non-terminal state that
+		// ClaimableTasks keeps returning, and the scheduler would retry it
+		// every poll forever.
+		return true, e.failTask(ctx, task, err)
+	}
+	return false, nil
 }
 
 // failTask records a harness failure and closes any step left running, so a
 // task can never be re-claimed and retried indefinitely.
 func (e *Engine) failTask(ctx context.Context, task *store.Task, cause error) error {
 	msg := cause.Error()
-	fmt.Fprintf(os.Stderr, "overseer: task %d failed: %v\n", task.ID, cause)
+	e.logf("task %d failed: %v", task.ID, cause)
 
+	// Detached for the same reason FinishStep is: recording a failure with the
+	// context that caused it is how a failure goes unrecorded.
+	ctx = context.WithoutCancel(ctx)
 	if _, err := e.Store.FailRunningSteps(ctx, task.ID, msg); err != nil {
-		fmt.Fprintf(os.Stderr, "overseer: task %d: close running steps: %v\n", task.ID, err)
+		e.logf("task %d: close running steps: %v", task.ID, err)
 	}
 	task.State = string(loop.StateFailed)
 	task.ErrMsg = msg
@@ -551,6 +649,7 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 	var res agent.Result
 	var spent agent.Result
 
+retry:
 	for attempt := 1; ; attempt++ {
 		res, err = role.Runner.Run(ctx, agent.RunSpec{
 			Args:           args,
@@ -570,14 +669,31 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 		spent.InputTokens += res.InputTokens
 		spent.OutputTokens += res.OutputTokens
 
-		if res.ErrMsg == "" || !res.Retryable || attempt >= maxRetries {
+		// res.Canceled is redundant with !res.Retryable now that the runner
+		// clears Retryable on a cancel, and is stated anyway: retrying a run
+		// the operator stopped would restart the agent three times over, each
+		// attempt running to its own step timeout. That is the failure this
+		// guard exists to make impossible to reintroduce.
+		if res.ErrMsg == "" || res.Canceled || !res.Retryable || attempt >= maxRetries {
 			break
 		}
 		delay := e.RetryBackoff * time.Duration(1<<(attempt-1))
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
-			return res, step, ctx.Err()
+			// Deliberately not "return res, step, ctx.Err()", as this used to
+			// be. That is a *machinery* error to dispatch, which sends it into
+			// failTask and marks the task permanently failed with "context
+			// canceled" — and failTask's own writes use the same cancelled
+			// context, so the failure may not even land. It also returned
+			// before FinishStep below, leaving the step row "running" forever
+			// with no daemon restart coming to sweep it. Fall out instead and
+			// close the step honestly.
+			res.Canceled = true
+			if res.ErrMsg == "" {
+				res.ErrMsg = "stopped before retry"
+			}
+			break retry
 		}
 	}
 
@@ -597,7 +713,13 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 	step.OutputTokens = res.OutputTokens
 	step.ErrMsg = res.ErrMsg
 	step.TranscriptPath = transcript
-	if err := e.Store.FinishStep(ctx, step, nil); err != nil {
+	// Detached from ctx on purpose. A stopped or shut-down step really did end,
+	// and we know its exit code and its usage; writing that with the context
+	// that was just cancelled leaves the row "running" and the dashboard's live
+	// pane spinning forever. Recover's sweep stays the safety net for a hard
+	// kill, not the normal path, and the shutdown grace period budgets exactly
+	// this bookkeeping.
+	if err := e.Store.FinishStep(context.WithoutCancel(ctx), step, nil); err != nil {
 		return agent.Result{}, store.Step{}, err
 	}
 	e.notify(task.ID)

@@ -78,6 +78,16 @@ func Slugify(s string) string {
 
 // git runs a git command in dir and returns trimmed combined output.
 func git(ctx context.Context, dir string, args ...string) (string, error) {
+	// An empty Dir makes exec run in the daemon's own working directory, which
+	// for a `commit -a` is overseer's source tree. That is not a hypothetical:
+	// a task whose worktree paths were never populated — one moved into a
+	// mid-flight state by hand, or by a bug — reaches Commit with an empty dir
+	// and quietly commits whatever the operator had staged, authored by
+	// overseer. Refusing is the only safe reading: there is no repository this
+	// could sensibly mean.
+	if dir == "" {
+		return "", fmt.Errorf("git %s: no repository directory given", strings.Join(args, " "))
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	// Agents must never be prompted for credentials; a prompt would hang

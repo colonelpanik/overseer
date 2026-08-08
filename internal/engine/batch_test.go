@@ -150,10 +150,11 @@ func TestAbandonRefusesATaskAWorkerCurrentlyOwns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !h.eng.claim(task.ID) {
+	_, ctrl, ok := h.eng.claim(ctx, task.ID)
+	if !ok {
 		t.Fatal("claim failed on a fresh task")
 	}
-	defer h.eng.release(task.ID)
+	defer h.eng.release(task.ID, ctrl)
 
 	if err := h.eng.Abandon(ctx, task.ID); err == nil {
 		t.Fatal("Abandon succeeded on a task a worker currently owns")
