@@ -146,23 +146,70 @@ func PRTitle(goal string) string {
 // PRBody assembles the PR description from the task goal, the converged
 // plan, and the final Codex review.
 func PRBody(goal, plan, review string) string {
+	const footer = "---\n\nOpened by overseer. The plan and the code each " +
+		"converged to zero blocking findings from Codex before this " +
+		"pull request was created.\n"
+
 	var b strings.Builder
 	b.WriteString("## Goal\n\n")
-	b.WriteString(strings.TrimSpace(goal))
+	b.WriteString(truncateBody(strings.TrimSpace(goal), maxGoalBytes, "goal"))
 	b.WriteString("\n\n")
 
+	// The plan is the only unbounded input here — PLAN.md is written by an
+	// agent and routinely runs to hundreds of kilobytes — so it absorbs
+	// whatever budget the fixed sections leave. It is truncated rather than
+	// dropped because the opening of a plan is the part a reviewer reads.
 	if p := strings.TrimSpace(plan); p != "" {
+		budget := maxPRBodyBytes - b.Len() - len(footer) - maxReviewBytes -
+			len("## Plan\n\n\n\n") - len(truncationNotice)
 		b.WriteString("## Plan\n\n")
-		b.WriteString(p)
+		b.WriteString(truncateBody(p, budget, "plan"))
 		b.WriteString("\n\n")
 	}
 	if r := strings.TrimSpace(review); r != "" {
 		b.WriteString("## Final Codex review\n\n")
-		b.WriteString(r)
+		b.WriteString(truncateBody(r, maxReviewBytes, "review"))
 		b.WriteString("\n\n")
 	}
-	b.WriteString("---\n\nOpened by overseer. The plan and the code each ")
-	b.WriteString("converged to zero blocking findings from Codex before this ")
-	b.WriteString("pull request was created.\n")
-	return b.String()
+	b.WriteString(footer)
+
+	out := b.String()
+	if len(out) > maxPRBodyBytes {
+		// Belt and braces. Every section is already bounded, so reaching here
+		// means an assumption above is wrong; losing the footer beats losing
+		// the pull request.
+		out = out[:maxPRBodyBytes-len(truncationNotice)] + truncationNotice
+	}
+	return out
+}
+
+// GitHub rejects a pull-request body over 65536 characters with
+// "GraphQL: Body is too long". A task that hits that has already converged,
+// pushed its branch, and spent its entire agent budget, so failing at the
+// final step is the most expensive possible place to discover it. The margin
+// leaves room for the API counting characters differently than Go counts
+// bytes on non-ASCII content.
+const (
+	maxPRBodyBytes = 60000
+	maxGoalBytes   = 4000
+	maxReviewBytes = 8000
+)
+
+const truncationNotice = "\n\n_[truncated by overseer — the full text is on this branch]_\n"
+
+// truncateBody caps a section, cutting at a line boundary where it can so the
+// result stays readable markdown rather than stopping mid-token.
+func truncateBody(s string, limit int, what string) string {
+	if limit < len(truncationNotice)+64 {
+		// No meaningful room left; say so rather than emitting a stub.
+		return fmt.Sprintf("_[%s omitted by overseer — no room in the pull-request body]_", what)
+	}
+	if len(s) <= limit {
+		return s
+	}
+	cut := s[:limit-len(truncationNotice)]
+	if i := strings.LastIndexByte(cut, '\n'); i > len(cut)/2 {
+		cut = cut[:i]
+	}
+	return cut + truncationNotice
 }

@@ -168,3 +168,55 @@ func TestGhOpenerReportsFailure(t *testing.T) {
 		t.Fatal("expected an error when gh fails")
 	}
 }
+
+func TestPRBodyStaysUnderGitHubsLimit(t *testing.T) {
+	// The bug this guards: PLAN.md is agent-written and routinely hundreds of
+	// kilobytes. GitHub rejects a body over 65536 characters, and the task has
+	// by then converged, pushed its branch and spent its whole agent budget —
+	// the most expensive possible place to fail.
+	hugePlan := strings.Repeat("# Task 1: do the thing\n\nSome plan prose here.\n\n", 20000)
+	if len(hugePlan) < 400_000 {
+		t.Fatalf("fixture too small to exercise the limit: %d bytes", len(hugePlan))
+	}
+
+	body := PRBody("Add CSV export", hugePlan, "No blocking findings remained.")
+
+	if len(body) > 65536 {
+		t.Errorf("body is %d bytes, over GitHub's 65536 limit", len(body))
+	}
+	// The parts a reviewer actually needs must survive.
+	for _, want := range []string{"## Goal", "Add CSV export", "## Plan", "Opened by overseer"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body lost %q to truncation", want)
+		}
+	}
+	if !strings.Contains(body, "truncated by overseer") {
+		t.Error("truncation happened silently, with no notice to the reader")
+	}
+}
+
+func TestPRBodyLeavesNormalSizedContentIntact(t *testing.T) {
+	plan := "# Plan\n\n1. Add the function\n2. Test it\n"
+	review := "No blocking findings remained."
+	body := PRBody("Add CSV export", plan, review)
+
+	for _, want := range []string{plan, review, "Add CSV export"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("ordinary content was altered; missing %q", want)
+		}
+	}
+	if strings.Contains(body, "truncated by overseer") {
+		t.Error("a small body was truncated")
+	}
+}
+
+func TestPRBodyHugeReviewAndGoalAlsoBounded(t *testing.T) {
+	// Codex output and a pasted goal are attacker-adjacent in size too.
+	body := PRBody(strings.Repeat("g", 200_000), "", strings.Repeat("r", 200_000))
+	if len(body) > 65536 {
+		t.Errorf("body is %d bytes, over the limit", len(body))
+	}
+	if !strings.Contains(body, "Opened by overseer") {
+		t.Error("the footer was lost")
+	}
+}
