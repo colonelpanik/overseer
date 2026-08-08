@@ -270,6 +270,16 @@ func (s *Store) RestartTask(ctx context.Context, t Task) error {
 		t.State, t.Phase, t.Iteration, t.MaxIterations, t.Goal, t.Constraints)
 }
 
+// ClearExecSession forgets the execution session, so the next exec turn starts
+// fresh and re-reads PLAN.md rather than running on what the old session
+// remembers of it.
+//
+// Narrow, like the other operator-driven writes: it runs from a request handler
+// holding a row read before the operator typed anything.
+func (s *Store) ClearExecSession(ctx context.Context, id int64) error {
+	return s.touchTask(ctx, id, `UPDATE tasks SET exec_session_id='', updated_at=? WHERE id=?`)
+}
+
 // touchTask runs a single-row update that ends with updated_at and id, and
 // reports a missing row as ErrNotFound.
 func (s *Store) touchTask(ctx context.Context, id int64, query string, args ...any) error {

@@ -714,3 +714,116 @@ func TestRestartReachesARunningWorker(t *testing.T) {
 		t.Error("a restarted task is still stopped; it would never be claimed")
 	}
 }
+
+// The workflow the plan tab exists for, end to end: stop a task, rewrite its
+// plan, start it, and have the next turn implement the rewrite.
+//
+// This is the sharpest statement of the feature, because it fails if any one of
+// three things is wrong — the write-back, the session clearing, or the
+// resume-to-fresh downgrade that makes a cleared session mean "re-read the
+// file".
+func TestEditingThePlanWhileStoppedRedirectsTheWork(t *testing.T) {
+	// An agent that copies whatever the plan says into its output, so the test
+	// can see which plan the turn actually acted on.
+	echoPlan := writeScript(t, "claude", `
+echo '{"type":"system","subtype":"init","session_id":"claude-sess"}'
+if [ -f PLAN.md ]; then cp PLAN.md acted-on.txt; else echo 'no plan' > acted-on.txt; fi
+echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude-sess","total_cost_usd":0.01}'
+`)
+	h := newHarness(t, echoPlan, fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "follow the plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.eng.setupWorktree(ctx, &task); err != nil {
+		t.Fatal(err)
+	}
+	// Mid-exec, with a session — the case where an edit would otherwise be
+	// ignored, because a resumed exec turn never re-reads the file.
+	task.State = string(loop.StateExecuting)
+	task.Phase = string(loop.PhaseExec)
+	task.Iteration = 2
+	task.ExecSessionID = "stale-session"
+	if err := h.st.SaveTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(task.WorktreeDir, "PLAN.md"),
+		[]byte("# the original plan\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Editing while it runs is refused: the write would race the agent.
+	if err := h.eng.WritePlan(ctx, task.ID, "# too early\n"); err == nil {
+		t.Error("WritePlan succeeded on a task that is not stopped")
+	}
+
+	if err := h.eng.Stop(ctx, task.ID, StopOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := h.eng.ReadPlan(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "the original plan") {
+		t.Fatalf("ReadPlan = %q, want the plan on disk", got)
+	}
+
+	if err := h.eng.WritePlan(ctx, task.ID, "# the operator's plan\n"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	// The edit is committed, so it is on the branch and in the diff rather than
+	// sitting uncommitted for the next turn to sweep up.
+	if out := gitOut(t, task.WorktreeDir, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Errorf("the edited plan was left uncommitted:\n%s", out)
+	}
+
+	// The session is gone, which is what makes the next turn re-read the file.
+	after, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ExecSessionID != "" {
+		t.Fatal("the exec session survived the edit; the next turn would ignore the new plan")
+	}
+
+	if err := h.eng.Start(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.RunTask(ctx, task.ID); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	// Read from the branch, not the worktree: a converged task's worktree is
+	// removed by finish, which deliberately keeps the branch as the record.
+	acted := gitOut(t, h.repo, "show", task.Branch+":acted-on.txt")
+	if !strings.Contains(acted, "the operator's plan") {
+		t.Errorf("the turn acted on %q, want the edited plan", acted)
+	}
+	if strings.Contains(acted, "the original plan") {
+		t.Error("the turn acted on the plan the operator replaced")
+	}
+}
+
+func TestReadPlanIsEmptyRatherThanAnErrorWithoutAWorktree(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	ctx := context.Background()
+
+	task, err := h.eng.Submit(ctx, BatchTask{Repo: h.repo, Goal: "no worktree yet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.eng.ReadPlan(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("ReadPlan on a queued task: %v", err)
+	}
+	if got != "" {
+		t.Errorf("ReadPlan = %q, want empty", got)
+	}
+	if err := h.eng.WritePlan(ctx, task.ID, "# nope\n"); err == nil {
+		t.Error("WritePlan succeeded on a task with no worktree")
+	}
+}

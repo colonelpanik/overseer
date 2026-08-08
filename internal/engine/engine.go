@@ -350,9 +350,18 @@ func (e *Engine) runTask(ctx context.Context, ctrl *taskControl, taskID int64) e
 				return err
 			}
 			action.Findings = toAgentFindings(stored)
-			if len(action.Findings) == 0 {
-				// Nothing to feed back: fall through to a fresh turn rather
-				// than resuming with an empty review.
+			// Fall through to a fresh turn when there is nothing to resume
+			// with. Two ways that happens: no findings to feed back, or no
+			// session to feed them into.
+			//
+			// The second is how an edited plan takes effect. A resumed exec
+			// turn is prompted with the findings alone and never re-reads
+			// PLAN.md — it runs on the session's memory of it — so editing the
+			// plan would change nothing. Saving an edit clears the session id,
+			// and a fresh turn is seeded from the file, which is what the state
+			// machine intends by starting execution without a resume in the
+			// first place.
+			if len(action.Findings) == 0 || action.ResumeSessionID == "" {
 				if action.Kind == loop.ActClaudePlanResume {
 					action.Kind = loop.ActClaudePlan
 				} else {
