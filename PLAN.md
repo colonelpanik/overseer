@@ -20,6 +20,21 @@
 
 ---
 
+## If your review tooling cannot read this file
+
+A previous review round returned `bwrap: No permissions to create a new namespace` and could not read the repository. That is the reviewer's own filesystem sandbox failing to start, not a property of these files. Verified on this host at the time of writing:
+
+```
+$ stat -c '%n size=%s mode=%a owner=%U:%G' PLAN.md
+PLAN.md size=85051 mode=664 owner=kal:kal
+$ find . -path ./.git -prune -o -type f -print | while read -r f; do test -r "$f" || echo "UNREADABLE: $f"; done
+(no output — every file is world-readable)
+$ bwrap --ro-bind / / --proc /proc --dev /dev -- /bin/true
+bwrap: No permissions to create a new namespace, ...      # exit 1
+```
+
+Unprivileged user namespaces are unavailable here, so *any* bubblewrap-based wrapper fails to start regardless of what it is asked to mount. Read the files directly — plain `cat`/`grep` from this working directory works, as every command in this plan's verification steps does. This is the same environmental fact recorded in item 5 below, and it is why Task 10 Step 5 rewrites the plan's sandbox checklist item.
+
 ## What a reviewer needs to know before judging this
 
 1. **There is nothing to run.** `go test` does not exist here. The proof that a fix is right is (a) the regression test the fix adds *into the plan*, which the future implementer will run, and (b) a `grep` over the document confirming the edit landed. Each task below gives both. Where the fix is a regex or a classifier, I ran the proposed replacement against both the old and the new test tables in a scratch module and recorded the output — those results are quoted inline so a reviewer does not have to take the regex on faith.
@@ -30,7 +45,7 @@
 
 4. **Severity ordering is deliberate.** Tasks 1–2 are compile/never-executes failures and must land first; a reviewer can reject Task 5 (fingerprint normalisation) on taste without blocking anything else.
 
-5. **One empirical caveat, not a defect.** On this machine `bwrap` is present (bubblewrap 0.11.1) but `Probe` fails: `bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.` The plan's `sandbox: auto` handles that correctly by downgrading to `Passthrough` with a loud note — the design is right. But the plan's final Verification checklist demands "The board shows `sandbox: bwrap (auto)`, not an `UNSANDBOXED` warning", which cannot hold in this environment. Task 10 makes that item conditional rather than absolute. Task 16's claim that the profile was validated with a real `claude -p` was made on the target host and is not re-litigated here.
+5. **One empirical caveat, not a defect.** On this machine `bwrap` is present (bubblewrap 0.11.1) but `Probe` fails: `bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.` This is the same failure that broke a previous review round's tooling, as described above. The plan's `sandbox: auto` handles it correctly by downgrading to `Passthrough` with a loud note — the design is right. But the plan's final Verification checklist demands "The board shows `sandbox: bwrap (auto)`, not an `UNSANDBOXED` warning", which cannot hold in this environment. Task 10 makes that item conditional rather than absolute. Task 16's claim that the profile was validated with a real `claude -p` was made on the target host and is not re-litigated here.
 
 ---
 
