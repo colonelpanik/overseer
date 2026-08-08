@@ -690,7 +690,23 @@ func rowNote(f taskFacts) string {
 		return fmt.Sprintf("Spent %s against a %s cap.",
 			money(f.Totals.CostUSD), money(f.Task.CostCapUSD))
 	}
+	if note := noRemoteNote(f.Task); note != "" {
+		return note
+	}
 	return f.Task.ErrMsg
+}
+
+// noRemoteNote explains a task that converged with nowhere to push.
+//
+// Derived rather than stored: a done task with no pull request URL is already
+// exactly that statement. Writing it into ErrMsg would render a task that
+// succeeded in the styling reserved for ones that broke.
+func noRemoteNote(t store.Task) string {
+	if t.State != "done" || t.PRURL != "" {
+		return ""
+	}
+	return "Done, with no remote to push to — the work is on " + branchName(t) +
+		". Add an origin and the next task opens a pull request."
 }
 
 // defaultTab picks the right-hand pane that answers the first question a task

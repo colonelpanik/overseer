@@ -357,10 +357,31 @@ func (m *Manager) Diff(ctx context.Context, wt Worktree) (string, error) {
 	return git(ctx, wt.Dir, "diff", wt.BaseRef+"...HEAD")
 }
 
-// Push publishes the branch and sets upstream.
-func (m *Manager) Push(ctx context.Context, wt Worktree) error {
-	_, err := git(ctx, wt.Dir, "push", "-u", "origin", wt.Branch)
-	return err
+// HasRemote reports whether a repository has an "origin" configured.
+//
+// A local config read with no network I/O, so it costs nothing even when the
+// remote is unreachable — and it answers a different question from "can we
+// reach it", which is what the fetch in Create is for.
+func HasRemote(ctx context.Context, repoPath string) bool {
+	return hasRemote(ctx, repoPath, "origin")
+}
+
+// Push publishes the branch and sets upstream, and reports whether it did.
+//
+// A repository with no origin is not an error. A project that has not been
+// given a remote yet — one overseer created itself, most obviously — should
+// still finish a task: the work is on the branch, which is the durable record
+// either way. Failing here instead meant a task ran the whole
+// plan/review/exec/review loop, converged, committed, and was only then marked
+// failed, having spent its entire budget on work it then reported as lost.
+func (m *Manager) Push(ctx context.Context, wt Worktree) (bool, error) {
+	if !HasRemote(ctx, wt.Dir) {
+		return false, nil
+	}
+	if _, err := git(ctx, wt.Dir, "push", "-u", "origin", wt.Branch); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Remove deletes the worktree directory. The branch is deliberately kept:

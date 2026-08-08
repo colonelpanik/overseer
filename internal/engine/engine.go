@@ -846,9 +846,28 @@ func (e *Engine) finish(ctx context.Context, task *store.Task) (*loop.Outcome, e
 		return &loop.Outcome{Failed: true,
 			ErrMsg: "nothing was committed; refusing to open an empty pull request"}, nil
 	}
-	if err := e.WT.Push(ctx, wt); err != nil {
+	pushed, err := e.WT.Push(ctx, wt)
+	if err != nil {
 		// The worktree is deliberately left in place so the work is not lost.
 		return &loop.Outcome{Failed: true, ErrMsg: "push: " + err.Error()}, nil
+	}
+	if !pushed {
+		// No remote to push to, which is a repository overseer can perfectly
+		// well work on — one it created itself, most obviously. The work is
+		// committed on the branch, which is the durable record either way, so
+		// this is done rather than failed. Add a remote later and the pull
+		// request flow resumes with no other change.
+		//
+		// Nothing is written to say so. A done task with no pull request URL
+		// is already exactly that statement, and the board reads it — putting
+		// it in ErrMsg instead would render a successful task in the styling
+		// reserved for ones that broke.
+		//
+		// The worktree is kept, unlike the pull-request path: there is no pull
+		// request to read the change in, so the checkout is the only place it
+		// can be looked at.
+		e.notify(task.ID)
+		return &loop.Outcome{}, nil
 	}
 
 	plan, _ := os.ReadFile(filepath.Join(wt.Dir, "PLAN.md"))
