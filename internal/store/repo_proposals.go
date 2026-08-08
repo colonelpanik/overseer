@@ -200,6 +200,66 @@ func (s *Store) ListProposals(ctx context.Context) ([]Proposal, error) {
 	return out, rows.Err()
 }
 
+// ProposalHistory is one past analysis plus how much of it has been acted on.
+type ProposalHistory struct {
+	Proposal
+	// Tasks is how many tasks the analysis proposed, Queued how many have
+	// become real tasks. The gap is what is still available to act on, which
+	// is the whole reason a finished analysis is worth keeping.
+	Tasks  int
+	Queued int
+}
+
+// AllProposals returns every analysis, newest first, with its task counts.
+//
+// Unlike ListProposals this includes the finished ones: an analysis whose
+// tasks were queued is exactly the thing an operator comes back to when they
+// want the rest of the list, and one that was discarded is still a record of
+// what was looked at and what it cost.
+func (s *Store) AllProposals(ctx context.Context, limit int) ([]ProposalHistory, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+proposalColumns+`,
+			(SELECT COUNT(*) FROM proposal_tasks t WHERE t.proposal_id = proposals.id),
+			(SELECT COUNT(*) FROM proposal_tasks t WHERE t.proposal_id = proposals.id AND t.created_task_id <> 0)
+		FROM proposals
+		ORDER BY id DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query proposal history: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ProposalHistory
+	for rows.Next() {
+		var h ProposalHistory
+		// scanProposal reads the shared column list; the two counts are
+		// appended after it, so they are scanned by a wrapper that forwards
+		// the leading destinations through.
+		sc := &appendScanner{rows: rows, extra: []any{&h.Tasks, &h.Queued}}
+		p, err := scanProposal(sc)
+		if err != nil {
+			return nil, fmt.Errorf("scan proposal history: %w", err)
+		}
+		h.Proposal = p
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// appendScanner lets scanProposal be reused for a query that selects extra
+// trailing columns, rather than duplicating the column list and its scan.
+type appendScanner struct {
+	rows  interface{ Scan(...any) error }
+	extra []any
+}
+
+func (a *appendScanner) Scan(dest ...any) error {
+	return a.rows.Scan(append(dest, a.extra...)...)
+}
+
 // ProposalSpend is what every analysis has cost in total. The dashboard's run
 // spend has to include it, or the figure under-reports real money.
 func (s *Store) ProposalSpend(ctx context.Context) (float64, error) {
@@ -209,6 +269,28 @@ func (s *Store) ProposalSpend(ctx context.Context) (float64, error) {
 		return 0, fmt.Errorf("proposal spend: %w", err)
 	}
 	return cost.Float64, nil
+}
+
+// FailStrandedProposals parks analyses left mid-run by a daemon restart.
+//
+// An analysis is a goroutine, not a claimable task, so nothing picks it back
+// up. Left alone the proposal says "analysing" forever and the wizard shows a
+// spinner that never resolves — the same lie InterruptRunningSteps exists to
+// prevent for task steps.
+func (s *Store) FailStrandedProposals(ctx context.Context, reason string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE proposals SET state = ?, err_msg = ?, updated_at = ?
+		WHERE state IN (?, ?)`,
+		ProposalFailed, reason, time.Now().UTC().Format(rfc3339),
+		ProposalAnalysing, ProposalCloning)
+	if err != nil {
+		return 0, fmt.Errorf("fail stranded proposals: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("rows affected: %w", err)
+	}
+	return int(n), nil
 }
 
 const proposalTaskColumns = `id, proposal_id, ord, key, goal, constraints,

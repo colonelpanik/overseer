@@ -46,6 +46,7 @@ func TestWritePreview(t *testing.T) {
 		"wizard-review.html": "/?wizard=3",
 		"wizard-failed.html": "/?wizard=4",
 		"settings.html":      "/?overlay=settings",
+		"analyses.html":      "/?overlay=analyses",
 	}
 	for name, path := range pages {
 		rec := httptest.NewRecorder()
@@ -311,6 +312,24 @@ func seedPreviewProposals(t *testing.T, st *store.Store) {
 		},
 	}
 	if err := st.ReplaceProposalTasks(ctx, ready.ID, rows); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5: partly queued — the case the history list exists for.
+	partial, err := st.CreateProposal(ctx, store.Proposal{
+		RepoPath: "/home/kal/code/clanker", State: store.ProposalReady,
+		Model: "claude-sonnet-5", MaxTasks: 12, CostUSD: 0.33,
+		Focus: []string{"DRY / KISS"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceProposalTasks(ctx, partial.ID, []store.ProposalTask{
+		{Key: "a", Goal: "Fold the three retry helpers into one.", Severity: "any",
+			Selected: true, CreatedTaskID: 2},
+		{Key: "b", Goal: "Drop the dead compatibility shim in cmd/.", Severity: "any", Selected: true},
+		{Key: "c", Goal: "Collapse the duplicated table-driven tests.", Severity: "minor", Selected: true},
+	}); err != nil {
 		t.Fatal(err)
 	}
 

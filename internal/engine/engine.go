@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"overseer/internal/agent"
@@ -141,6 +142,19 @@ func (e *Engine) Recover(ctx context.Context) error {
 	}
 	if n > 0 {
 		fmt.Fprintf(os.Stderr, "overseer: marked %d interrupted step(s) from a previous run\n", n)
+	}
+
+	// An analysis runs in a goroutine, not a claimable task, so a restart
+	// leaves its proposal saying "analysing" with nothing behind it. Without
+	// this the wizard shows a spinner that never resolves and the operator has
+	// no way to tell a long analysis from a dead one.
+	m, err := e.Store.FailStrandedProposals(ctx,
+		"the daemon restarted while this analysis was running")
+	if err != nil {
+		return err
+	}
+	if m > 0 {
+		fmt.Fprintf(os.Stderr, "overseer: marked %d stranded analysis/analyses from a previous run\n", m)
 	}
 	return nil
 }
@@ -547,6 +561,7 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 			Sandbox:        e.Sandbox,
 			SandboxSpec:    e.sandboxSpec(*task, role.Agent, role.Writable),
 			Env:            role.Env,
+			OnEvent:        e.progressNotifier(task.ID),
 		})
 		if err != nil {
 			return agent.Result{}, store.Step{}, err
@@ -587,6 +602,41 @@ func (e *Engine) runAgent(ctx context.Context, task *store.Task, phase string,
 	}
 	e.notify(task.ID)
 	return res, step, nil
+}
+
+// notifyInterval is how often a running agent reports progress to the
+// dashboard. The page reloads on every notification, so this trades staleness
+// against churn: two seconds keeps a live transcript visibly moving without
+// reloading the page on every line an agent prints.
+const notifyInterval = 2 * time.Second
+
+// progressNotifier returns an OnEvent hook that pokes the dashboard while an
+// agent is still running.
+//
+// Without it a turn is silent from start to finish: the board would show a
+// step as "running" and the live pane would hold whatever the transcript said
+// when the page last loaded, for however many minutes the turn takes. The
+// analysis wizard made that especially visible, since one analysis is a single
+// long run with nothing else happening to trigger a reload.
+//
+// It runs on the runner's reader goroutine and must not block. Broadcast never
+// does, and the throttle is a compare-and-swap rather than a lock.
+func (e *Engine) progressNotifier(id int64) func(agent.Event) {
+	var last atomic.Int64
+	return func(agent.Event) {
+		now := time.Now().UnixNano()
+		prev := last.Load()
+		if now-prev < int64(notifyInterval) {
+			return
+		}
+		// One notification wins the interval; the losers skip rather than
+		// queue, because a dropped poke costs nothing — the next event is
+		// along in a moment and the page re-reads everything anyway.
+		if !last.CompareAndSwap(prev, now) {
+			return
+		}
+		e.notify(id)
+	}
 }
 
 // recordFindings attaches a verdict and its findings to the step the caller

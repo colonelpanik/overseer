@@ -301,10 +301,18 @@ func (e *Engine) runAnalysisAgent(ctx context.Context, p *store.Proposal, prompt
 		Sandbox:        e.Sandbox,
 		SandboxSpec:    e.analysisSandboxSpec(p.RepoPath, runDir, role.Agent),
 		Env:            role.Env,
+		// Without this the wizard's live pane would hold whatever the
+		// transcript said when the page loaded, for the whole analysis.
+		OnEvent: e.progressNotifier(0),
 	})
 }
 
 // QueueProposal turns the selected rows into real tasks.
+//
+// It can be called more than once on the same analysis. Queueing three of
+// twelve and coming back next week for four more is the normal way to use a
+// long proposal, so a row that already produced a task is skipped rather than
+// duplicated, and the proposal only reaches "queued" once nothing is left.
 //
 // Dependencies are resolved by created task ID, not by slug. Submit suffixes a
 // slug on collision, so the slug a proposal predicted is not necessarily the
@@ -323,17 +331,29 @@ func (e *Engine) QueueProposal(ctx context.Context, proposalID int64) ([]store.T
 		return nil, err
 	}
 
+	// Seed the key map with rows queued on an earlier pass. A task queued
+	// today that depends on one queued last week must link to the task that
+	// already exists, not silently lose the dependency.
+	byKey := map[string]int64{}
 	var selected []store.ProposalTask
+	remaining := 0
 	for _, r := range rows {
+		if r.CreatedTaskID != 0 {
+			byKey[r.Key] = r.CreatedTaskID
+			continue
+		}
+		remaining++
 		if r.Selected {
 			selected = append(selected, r)
 		}
 	}
 	if len(selected) == 0 {
+		if remaining == 0 {
+			return nil, fmt.Errorf("every task from this analysis has already been queued")
+		}
 		return nil, fmt.Errorf("nothing is selected")
 	}
 
-	byKey := make(map[string]int64, len(selected))
 	created := make([]store.Task, 0, len(selected))
 	for _, r := range selected {
 		task, err := e.Submit(ctx, BatchTask{
@@ -375,7 +395,12 @@ func (e *Engine) QueueProposal(ctx context.Context, proposalID int64) ([]store.T
 		}
 	}
 
-	p.State = store.ProposalQueued
+	// The analysis stays reviewable while any of its tasks are still
+	// unqueued: that is what makes coming back for the rest possible. Only a
+	// proposal with nothing left is finished.
+	if remaining-len(created) <= 0 {
+		p.State = store.ProposalQueued
+	}
 	if err := e.Store.SaveProposal(ctx, p); err != nil {
 		return created, err
 	}

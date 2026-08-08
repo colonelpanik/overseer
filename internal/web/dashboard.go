@@ -129,6 +129,16 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 		}
 	}
 
+	chip, analyses, err := s.buildAnalyses(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	d.Running = chip
+	if q.Overlay == "analyses" {
+		d.Analyses = analyses
+		d.ShowingAll = true
+	}
+
 	if q.Overlay == "settings" {
 		settings := s.buildSettings(q)
 		settings.Saved = q.Saved

@@ -21,6 +21,14 @@
       {{if .RunCap}}<span class="small">{{.RunCap}}</span>{{end}}
     </div>
     <a class="btn btn-secondary btn-mono" href="{{.Q.URL "overlay" "cli"}}">$ overseer status</a>
+    {{with .Running}}
+    {{/* The wizard lives in the URL, so closing that tab loses the only link
+         to a run still in progress. This is the way back. */}}
+    <a class="analysis-chip{{if .Live}} live{{end}}" href="{{.URL}}">
+      {{if .Live}}<span class="pip"></span>{{end}}{{.Label}}
+    </a>
+    {{end}}
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "analyses"}}">Analyses</a>
     <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardNew}}">Analyse a repo</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "settings"}}">Models</a>
     <a class="btn btn-primary" href="{{.Q.URL "overlay" "add"}}">Queue task</a>
@@ -562,16 +570,20 @@
         {{if not .Rows}}
           <p class="muted" style="font-size:13px;margin:0">The analysis produced nothing. Try again with different focus areas.</p>
         {{else}}
-        <div class="small">{{len .Rows}} proposed · {{.Selected}} selected · {{.RepoPath}}</div>
+        <div class="small">{{len .Rows}} proposed · {{.Selected}} selected{{if .AlreadyQueued}} · {{.AlreadyQueued}} already queued{{end}} · {{.RepoPath}}</div>
         {{$wid := .ID}}
         {{range $row := .Rows}}
-        <div class="proposed{{if not $row.Selected}} off{{end}}">
+        <div class="proposed{{if and (not $row.Selected) (not $row.Queued)}} off{{end}}{{if $row.Queued}} done{{end}}">
+          {{if $row.Queued}}
+          <span class="pickbtn" title="already queued as a task"><span class="check on"></span></span>
+          {{else}}
           <form class="inline" method="post" action="/analyse/{{$wid}}/task/{{$row.ID}}">
             <input type="hidden" name="action" value="toggle">
             <button class="pickbtn" type="submit" title="include or drop this task">
               <span class="check{{if $row.Selected}} on{{end}}"></span>
             </button>
           </form>
+          {{end}}
           <div class="proposed-body">
             <div class="goal">{{$row.Goal}}</div>
             <div class="small">{{$row.Meta}}</div>
@@ -582,6 +594,9 @@
             {{if $row.DependsOn}}
             <div class="small">runs after {{join ", " $row.DependsOn}}</div>
             {{end}}
+            {{if $row.Queued}}
+            <a class="small" href="{{$row.TaskURL}}">already queued — open the task</a>
+            {{else}}
             <details class="edit">
               <summary class="small">edit</summary>
               <form method="post" action="/analyse/{{$wid}}/task/{{$row.ID}}">
@@ -606,6 +621,7 @@
                 </div>
               </form>
             </details>
+            {{end}}
           </div>
         </div>
         {{end}}
@@ -633,6 +649,62 @@
         </form>
       </div>
     {{end}}
+  </div>
+</div>
+{{end}}
+
+{{if .ShowingAll}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Analyses</h4>
+      <span class="small">{{len .Analyses}} kept</span>
+      <span class="spacer"></span>
+      <a class="btn btn-primary" href="{{.Q.URL "wizard" wizardNew "overlay" ""}}">Analyse a repo</a>
+      <a class="btn btn-ghost" href="{{.Q.URL "overlay" ""}}">close</a>
+    </div>
+    <div class="body">
+      {{if not .Analyses}}
+        <p class="muted" style="font-size:13px;margin:0">Nothing analysed yet. Point one at a repository and its
+          proposals stay here — a list you queued three of is a list you can come back to for the rest.</p>
+      {{else}}
+      <div class="small">An analysis keeps its proposals after you queue some. Reopen one to queue what is left,
+        or to see what it already produced.</div>
+      {{range .Analyses}}
+      <div class="analysisrow tone-{{.Tone}}">
+        <span class="rail"></span>
+        <div>
+          <div class="line">
+            <span class="dot"></span>
+            <span class="label state">{{.State}}</span>
+            <span class="small">{{.When}}</span>
+          </div>
+          <div class="mono" style="font-size:13px">{{.Repo}}</div>
+          {{if .Focus}}<div class="small">{{.Focus}}</div>{{end}}
+          {{if .Err}}<div class="small" style="color:var(--color-accent-800)">{{.Err}}</div>{{end}}
+        </div>
+        <div>
+          <div class="small">{{.Progress}}</div>
+          <div class="small">{{.Spend}}</div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:flex-end">
+          {{if .OpenURL}}
+            {{if .Remaining}}
+            <a class="btn btn-primary" href="{{.OpenURL}}">Queue {{.Remaining}} more</a>
+            {{else}}
+            <a class="btn btn-secondary" href="{{.OpenURL}}">Open</a>
+            {{end}}
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{end}}
+    </div>
+    <div class="foot">
+      <span class="small">Analyses are kept so a proposal outlives the sitting it was made in.</span>
+      <span class="spacer"></span>
+      <a class="btn btn-secondary" href="{{.Q.URL "overlay" ""}}">Close</a>
+    </div>
   </div>
 </div>
 {{end}}

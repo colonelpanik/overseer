@@ -305,6 +305,12 @@ type ProposedRow struct {
 	Verify    string
 	Cap       string
 	Selected  bool
+	// Queued marks a row that already produced a task on an earlier pass.
+	// It stays on the list rather than disappearing, so reopening an analysis
+	// shows what was acted on as well as what is left.
+	Queued bool
+	// TaskURL points at the task this row became.
+	TaskURL string
 }
 
 // WizardWaiting explains a step that is working rather than asking.
@@ -338,6 +344,9 @@ type WizardView struct {
 
 	Rows     []ProposedRow
 	Selected int
+	// AlreadyQueued is how many of these rows became tasks on an earlier
+	// pass, which is what makes a reopened analysis legible.
+	AlreadyQueued int
 
 	CloseURL string
 }
@@ -388,6 +397,39 @@ type Dashboard struct {
 	Add      AddForm
 	Wizard   *WizardView
 	Settings *SettingsView
+	// Running is the nav chip for an analysis in progress or waiting to be
+	// reviewed. Without it, closing the wizard's tab loses the only link to a
+	// run that is still going.
+	Running    *RunningAnalysis
+	Analyses   []AnalysisRow
+	ShowingAll bool
+}
+
+// RunningAnalysis is the nav chip pointing at an in-flight or unreviewed
+// analysis.
+type RunningAnalysis struct {
+	Label string
+	URL   string
+	Live  bool
+}
+
+// AnalysisRow is one past analysis in the history list.
+type AnalysisRow struct {
+	ID    int64
+	State string
+	Tone  string
+	Repo  string
+	When  string
+	Spend string
+	Focus string
+	// Progress reads "3 of 12 queued", which is the number that decides
+	// whether there is anything left to act on.
+	Progress string
+	// Remaining is how many proposed tasks have not become real ones.
+	Remaining int
+	// OpenURL reopens the analysis; empty when there is nothing to reopen.
+	OpenURL string
+	Err     string
 }
 
 // buildWizard assembles the analysis wizard for the proposal in the URL.
@@ -455,6 +497,7 @@ func buildWizard(p store.Proposal, rows []store.ProposalTask, live *LivePane, q 
 		row := ProposedRow{
 			ID:        r.ID,
 			Goal:      r.Goal,
+			Queued:    r.CreatedTaskID != 0,
 			Meta:      strings.Join(meta, " · "),
 			Rationale: r.Rationale,
 			Evidence:  r.Evidence,
@@ -464,7 +507,14 @@ func buildWizard(p store.Proposal, rows []store.ProposalTask, live *LivePane, q 
 			Cap:       fmt.Sprintf("%.2f", r.CostCap),
 			Selected:  r.Selected,
 		}
-		if r.Selected {
+		switch {
+		case row.Queued:
+			row.TaskURL = q.URL("sel", r.CreatedTaskID, "wizard", 0)
+			w.AlreadyQueued++
+		case r.Selected:
+			// Only rows that have not already become tasks count towards the
+			// queue button: pressing it must not promise to re-create work
+			// that is already on the board.
 			w.Selected++
 		}
 		w.Rows = append(w.Rows, row)

@@ -148,6 +148,17 @@ so and regenerate.
 Nothing queues itself. The wizard always ends with a human pressing the button,
 because that is the only checkpoint before money starts being spent.
 
+**An analysis outlives the sitting it was made in.** Queue three of twelve
+today and the other nine stay on the list; reopen it next week from
+**Analyses** and queue what is left. Rows already turned into tasks are struck
+through with a link to the task, and a dependency on one of them attaches to
+the task that already exists rather than being silently dropped. The nav shows
+a chip while an analysis is running or has tasks waiting to be reviewed, so
+closing the tab does not lose the only link to it.
+
+An analysis that a daemon restart interrupted is parked as failed with that
+reason, rather than showing a spinner forever.
+
 Three things are true of the analysis and worth knowing:
 
 - **The repository is mounted read-only**, `.git` included. `git log` and
