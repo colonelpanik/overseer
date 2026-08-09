@@ -84,6 +84,17 @@ type Provider struct {
 	// Models are the models this provider may be asked for. The dashboard's
 	// dropdown is exactly this list.
 	Models []string `yaml:"models"`
+	// EnforceSchema turns schema enforcement on or off for this endpoint.
+	//
+	// A pointer so that absent and false are different: absent means on, which
+	// is the right default because an enforced schema is strictly better than a
+	// suggested one — a reply of the wrong shape cannot be produced, rather
+	// than being caught afterwards by a parser once the money is spent.
+	//
+	// Off exists for an endpoint that cannot do it. Both CLIs implement this as
+	// a constrained tool call, and a gateway that mishandles those would fail
+	// every run with no way back short of changing model.
+	EnforceSchema *bool `yaml:"structured_output"`
 	// WireAPI is the protocol an OpenAI-shaped endpoint speaks: "responses" or
 	// "chat". Empty means responses, which is the only one codex 0.147 still
 	// accepts — it refuses wire_api = "chat" at config load. Meaningless for an
@@ -204,6 +215,12 @@ func (p Provider) Credential() string {
 // iteration discovering it.
 func (p Provider) KeyPresent() bool {
 	return p.Key != "" || p.KeyEnv == "" || os.Getenv(p.KeyEnv) != ""
+}
+
+// StructuredOutput reports whether a schema should be enforced by the CLI
+// rather than merely stated in the prompt.
+func (p Provider) StructuredOutput() bool {
+	return p.EnforceSchema == nil || *p.EnforceSchema
 }
 
 // Metered reports whether usage against this provider is real money to the

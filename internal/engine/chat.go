@@ -302,7 +302,7 @@ func (e *Engine) runChat(ctx context.Context, chat *store.Chat, repo store.Repo,
 	transcript := filepath.Join(runDir, "chat.jsonl")
 
 	res, err := role.Runner.Run(ctx, agent.RunSpec{
-		Args:           role.args(prompt, chat.Session, "", ""),
+		Args:           role.args(prompt, chat.Session, "", "", ""),
 		Dir:            repo.Path,
 		TranscriptPath: transcript,
 		Timeout:        e.analysisTimeout(),
@@ -562,7 +562,7 @@ func (e *Engine) runPull(ctx context.Context, p *store.Proposal, prompt string) 
 
 	for attempt := 1; attempt <= 2; attempt++ {
 		res, err := role.Runner.Run(ctx, agent.RunSpec{
-			Args:           role.args(prompt, "", "", ""),
+			Args:           role.args(prompt, "", "", "", string(agent.ProposalSchema)),
 			Dir:            p.RepoPath,
 			TranscriptPath: transcript,
 			Timeout:        e.analysisTimeout(),

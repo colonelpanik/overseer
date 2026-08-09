@@ -512,3 +512,48 @@ providers:
 		t.Errorf("a config with no key in it should load at any mode: %v", err)
 	}
 }
+
+func TestStructuredOutputIsOnByDefaultAndCanBeTurnedOff(t *testing.T) {
+	// On by default because an enforced schema is strictly better than a
+	// suggested one: a reply of the wrong shape cannot be produced rather than
+	// being caught afterwards, by a parser, after the money is spent.
+	//
+	// Off is for an endpoint that cannot do it. A gateway that mishandles the
+	// forced tool call would otherwise fail every run with no way back short of
+	// changing model.
+	if !(Provider{}).StructuredOutput() {
+		t.Error("a provider that says nothing should enforce schemas")
+	}
+	off := false
+	if (Provider{EnforceSchema: &off}).StructuredOutput() {
+		t.Error("structured_output: false should turn it off")
+	}
+	on := true
+	if !(Provider{EnforceSchema: &on}).StructuredOutput() {
+		t.Error("structured_output: true should keep it on")
+	}
+}
+
+func TestStructuredOutputReadsFromTheConfigFile(t *testing.T) {
+	path := writeConfig(t, `
+providers:
+  shaky:
+    kind: anthropic
+    base_url: https://gw.example/
+    key_env: GW_KEY
+    structured_output: false
+    models: [some-model]
+roles:
+  analyse: {agent: claude, provider: shaky, model: some-model}
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Providers["shaky"].StructuredOutput() {
+		t.Error("the file turned it off and it stayed on")
+	}
+	if !c.Providers["anthropic"].StructuredOutput() {
+		t.Error("an untouched provider should still enforce schemas")
+	}
+}

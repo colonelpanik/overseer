@@ -433,6 +433,19 @@ func (e *Engine) acceptOnce(ctx context.Context, p *store.Proposal, prompt strin
 // run directory the only writable path. A design conversation about an existing
 // repository must not be able to leave a branch, a stash or an edit behind in a
 // tree the operator only asked it to think about.
+// designSchema is the schema for the accept turn, and nothing for the rest.
+//
+// Only the accept turn produces a structured answer. Constraining a
+// conversational turn would force every reply into a task list, which is the
+// opposite of what the conversation is for — and is why the architect prompt
+// spends a paragraph telling it not to produce one yet.
+func designSchema(label string) string {
+	if label != "accept" {
+		return ""
+	}
+	return string(agent.DesignSchema)
+}
+
 func (e *Engine) runArchitect(ctx context.Context, p *store.Proposal, prompt, label string) (agent.Result, error) {
 	role, err := e.resolveRole(config.RoleArchitect)
 	if err != nil {
@@ -471,7 +484,7 @@ func (e *Engine) runArchitect(ctx context.Context, p *store.Proposal, prompt, la
 	}
 
 	res, err := role.Runner.Run(ctx, agent.RunSpec{
-		Args:           role.args(prompt, p.ArchitectSession, "", ""),
+		Args:           role.args(prompt, p.ArchitectSession, "", "", designSchema(label)),
 		Dir:            dir,
 		TranscriptPath: transcript,
 		Timeout:        e.analysisTimeout(),

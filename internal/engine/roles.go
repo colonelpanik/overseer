@@ -24,6 +24,10 @@ type resolved struct {
 	// whichever CLI it happens to run through, and the coder must be able to
 	// whichever CLI it happens to run through.
 	Writable bool
+	// Enforce is whether this role's schema is handed to the CLI to enforce,
+	// rather than only stated in its prompt. Follows the provider: it is the
+	// endpoint that either supports the constrained tool call or does not.
+	Enforce bool
 	// BaseURL and WireAPI describe a third-party endpoint, empty for a vendor's
 	// own. codex needs them on its command line rather than in its environment
 	// — see agent.CodexOpts.
@@ -115,6 +119,7 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 		Model:    role.Model,
 		BaseURL:  provider.BaseURL,
 		WireAPI:  provider.WireAPI,
+		Enforce:  provider.StructuredOutput(),
 		Env:      agent.ProviderEnv(role.Agent, provider.Kind, provider.BaseURL, key),
 		Writable: roleWrites[name],
 		Confined: e.confining(),
@@ -169,7 +174,7 @@ func (e *Engine) agentEnv(role resolved) map[string]string {
 // The two CLIs take different flags for the same job, so the role's agent —
 // not the role's name — decides the shape. schemaPath and lastMessage are
 // only meaningful for a reviewer; a coder passes them empty.
-func (r resolved) args(prompt, resume, schemaPath, lastMessage string) []string {
+func (r resolved) args(prompt, resume, schemaPath, lastMessage, schema string) []string {
 	if r.Agent == config.AgentCodex {
 		return agent.CodexArgs(agent.CodexOpts{
 			Prompt:              prompt,
@@ -184,23 +189,36 @@ func (r resolved) args(prompt, resume, schemaPath, lastMessage string) []string 
 			WireAPI: r.WireAPI,
 		})
 	}
-	return agent.ClaudeArgs(agent.ClaudeOpts{
+	opts := agent.ClaudeOpts{
 		Prompt:          prompt,
 		ResumeSessionID: resume,
 		Model:           r.Model,
-	})
+	}
+	if r.structured() {
+		// Inline rather than a path: the flag takes the schema itself.
+		opts.JSONSchema = schema
+	}
+	return agent.ClaudeArgs(opts)
 }
 
-// structured reports whether this role's CLI can be told to emit a JSON
-// object matching a schema.
+// structured reports whether this role's CLI will be told to emit a JSON
+// object matching a schema, rather than merely asked to in its prompt.
 //
-// Only `codex exec` takes --output-schema. A reviewer running through
-// `claude` therefore has the contract stated in its prompt instead, and the
-// verdict is read from its final message. ParseVerdict is the guarantee
-// either way, which is why swapping the reviewer's CLI is safe: the strict
-// parser, not the flag, is what stands between malformed output and a silent
-// approval.
-func (r resolved) structured() bool { return r.Agent == config.AgentCodex }
+// Both CLIs can: `codex exec` takes --output-schema, and `claude -p` takes
+// --json-schema, which it implements as a forced tool call whose input_schema
+// is the schema. An earlier version of this said claude could not, which was
+// true of the version it was written against and stopped being true without
+// anything here noticing — so a claude-backed reviewer or analysis was getting
+// the contract as prose when it could have been getting it enforced.
+//
+// The provider decides, because it is the endpoint that either supports the
+// constrained tool call or does not: a gateway that mishandles it would fail
+// every run, and structured_output: false is the way back.
+//
+// ParseVerdict and ParseProposal remain the guarantee either way. Enforcement
+// makes malformed output far less likely; it is the strict parser, not the
+// flag, that stands between it and a silent approval.
+func (r resolved) structured() bool { return r.Enforce }
 
 // withInlineSchema appends the verdict schema to a review prompt.
 //
