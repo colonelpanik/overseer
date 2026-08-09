@@ -29,39 +29,6 @@ func mustReadProposalSchema() []byte {
 	return b
 }
 
-// DesignSchema is the architect's accept response: the design document and the
-// tasks that build it.
-//
-// Built from ProposalSchema rather than written out again. The task half is the
-// same contract whichever door it comes through — that is the whole reason
-// ValidateProposedTasks is shared — and a second copy of it would drift the
-// first time either was edited.
-var DesignSchema = mustBuildDesignSchema()
-
-func mustBuildDesignSchema() []byte {
-	var s map[string]any
-	if err := json.Unmarshal(ProposalSchema, &s); err != nil {
-		panic("proposal schema is not valid JSON: " + err.Error())
-	}
-	props, ok := s["properties"].(map[string]any)
-	if !ok {
-		panic("proposal schema has no properties object")
-	}
-	props["design"] = map[string]any{
-		"type": "string",
-		"description": "The design, as a markdown document, written for someone who was not " +
-			"part of the conversation: what this is, its shape, the decisions actually " +
-			"taken and why, and anything ruled out on purpose. No task list.",
-	}
-	s["required"] = []any{"design", "tasks"}
-
-	out, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		panic("build design schema: " + err.Error())
-	}
-	return out
-}
-
 // ProposedTask is one task an analysis suggests.
 //
 // The scalar fields are pointers so a missing key is distinguishable from a

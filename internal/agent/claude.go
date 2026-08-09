@@ -13,11 +13,6 @@ type ClaudeOpts struct {
 	// review reaches the same Claude session that produced the work.
 	ResumeSessionID string
 	Model           string
-	// JSONSchema constrains the final answer, as schema text rather than a
-	// path — the flag takes it inline. Claude Code implements it as a forced
-	// tool call whose input_schema is this, so a reply of the wrong shape
-	// cannot be produced rather than being caught afterwards by the parser.
-	JSONSchema string
 }
 
 // ClaudeArgs builds the argv for a headless Claude run.
@@ -51,9 +46,6 @@ func ClaudeArgs(o ClaudeOpts) []string {
 	if o.Model != "" {
 		args = append(args, "--model", o.Model)
 	}
-	if o.JSONSchema != "" {
-		args = append(args, "--json-schema", o.JSONSchema)
-	}
 	return append(args, o.Prompt)
 }
 
@@ -68,12 +60,6 @@ type claudeLine struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"message"`
-
-	// StructuredOutput is the validated object, present only when the run was
-	// given --json-schema. An object rather than a string: the sibling
-	// "result" field holds the same thing as text, but only when the CLI
-	// chose to serialise it there.
-	StructuredOutput json.RawMessage `json:"structured_output"`
 
 	IsError    bool    `json:"is_error"`
 	TotalCost  float64 `json:"total_cost_usd"`
@@ -126,9 +112,6 @@ func ParseClaudeLine(line []byte) (Event, error) {
 
 	case "result":
 		ev.Kind = EventResult
-		if len(cl.StructuredOutput) > 0 && string(cl.StructuredOutput) != "null" {
-			ev.Structured = string(cl.StructuredOutput)
-		}
 		ev.CostUSD = cl.TotalCost
 		ev.InputTokens = cl.Usage.InputTokens
 		ev.OutputTokens = cl.Usage.OutputTokens

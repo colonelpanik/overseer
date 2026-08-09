@@ -210,7 +210,7 @@ func (e *Engine) runScaffold(ctx context.Context, p *store.Proposal) (agent.Resu
 	transcript := filepath.Join(runDir, "scaffold.jsonl")
 
 	return role.Runner.Run(ctx, agent.RunSpec{
-		Args:           role.args(ScaffoldPrompt(p.Design), "", "", "", ""),
+		Args:           role.args(ScaffoldPrompt(p.Design), "", "", ""),
 		Dir:            p.RepoPath,
 		TranscriptPath: transcript,
 		Timeout:        e.Cfg.StepTimeout,

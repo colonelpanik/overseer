@@ -42,13 +42,13 @@ func TestResolveRoleUsesTheConfiguredAgentAndModel(t *testing.T) {
 	if r.Env[agent.CodexKeyEnv] != "secret-value" {
 		t.Errorf("env did not carry the key read from OVERSEER_TEST_LLM_KEY")
 	}
-	joined := strings.Join(r.args("go", "", "", "", ""), " ")
+	joined := strings.Join(r.args("go", "", "", ""), " ")
 	if !strings.Contains(joined, `base_url="https://llm.dc.internal/v1"`) {
 		t.Errorf("argv does not route to the endpoint: %s", joined)
 	}
 
 	// And the argv carries the model.
-	args := r.args("prompt", "", "", "", "")
+	args := r.args("prompt", "", "", "")
 	if !containsArg(args, "-m") || !containsArg(args, "qwen3-coder-480b") {
 		t.Errorf("args = %v, want the model passed to codex", args)
 	}
@@ -132,11 +132,10 @@ func TestCoderGetsAWritableWorktreeThroughEitherCLI(t *testing.T) {
 	}
 }
 
-func TestAClaudeReviewerIsHeldToTheSchemaToo(t *testing.T) {
-	// This used to assert the opposite, because `claude -p` had no way to be
-	// held to a schema and the strict parser was the only guarantee left.
-	// Claude Code gained --json-schema, so a claude reviewer now gets the same
-	// enforcement a codex one does — and still no codex-only flags.
+func TestReviewerWithoutSchemaSupportGetsTheContractInThePrompt(t *testing.T) {
+	// `claude -p` has no --output-schema, so the schema becomes prompt text
+	// and the strict parser is the only guarantee left. Dropping it silently
+	// would leave the reviewer with no stated contract at all.
 	h := newHarness(t, "true", "true")
 	h.eng.Cfg.Roles[config.RoleReview] = config.Role{
 		Agent: config.AgentClaude, Provider: "anthropic",
@@ -145,29 +144,22 @@ func TestAClaudeReviewerIsHeldToTheSchemaToo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !r.structured() {
-		t.Fatal("a claude reviewer should be held to the verdict schema")
+	if r.structured() {
+		t.Fatal("a claude reviewer cannot be told to emit a schema-checked object")
 	}
 
-	args := r.args("Review the diff.", "", "", "", string(agent.VerdictSchema))
-	if !containsArg(args, "--json-schema") {
-		t.Errorf("args = %v, want the schema enforced", args)
-	}
-	for _, unwanted := range []string{"--output-schema", "--output-last-message"} {
-		if containsArg(args, unwanted) {
-			t.Errorf("args = %v, want no %s for a claude reviewer", args, unwanted)
-		}
-	}
-}
-
-func TestTheInlineContractIsStillThereForAnEndpointThatCannotEnforce(t *testing.T) {
-	// structured_output: false falls back to stating the contract in the
-	// prompt. Dropping it silently would leave the reviewer with no stated
-	// contract at all.
 	prompt := withInlineSchema("Review the diff.")
 	for _, want := range []string{"changes_requested", "findings", "severity"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the inline schema is missing %q", want)
+		}
+	}
+
+	// The argv must not carry codex-only flags.
+	args := r.args(prompt, "", "", "")
+	for _, unwanted := range []string{"--output-schema", "--output-last-message"} {
+		if containsArg(args, unwanted) {
+			t.Errorf("args = %v, want no %s for a claude reviewer", args, unwanted)
 		}
 	}
 }
@@ -283,7 +275,7 @@ func TestConfinedAgentsSkipTheirOwnSandbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := review.args("p", "", "", "", "")
+	args := review.args("p", "", "", "")
 	if !hasArg(args, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Errorf("codex argv = %v, want it to skip building its own sandbox", args)
 	}
@@ -317,7 +309,7 @@ func TestUnconfinedAgentsKeepTheirOwnSandbox(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		args := review.args("p", "", "", "", "")
+		args := review.args("p", "", "", "")
 		if !hasArg(args, "-s") || !hasArg(args, "read-only") {
 			t.Errorf("wrapper %v: codex argv = %v, want -s read-only kept", wrapper, args)
 		}
@@ -358,102 +350,3 @@ func (f fakeWrapper) Wrap(bin string, args []string, _ sandbox.Spec) (string, []
 	return bin, args
 }
 func (f fakeWrapper) Name() string { return f.name }
-
-func TestClaudeEnforcesASchemaWhenGivenOne(t *testing.T) {
-	// The comment this replaces said claude had no way to be held to a schema,
-	// so a claude-backed reviewer or analysis got the contract as prose in its
-	// prompt and the parser was the only thing standing behind it. Claude Code
-	// gained --json-schema; enforcing it means a reply of the wrong shape
-	// cannot be produced at all.
-	h := newHarness(t, "true", "true")
-	r, err := h.eng.resolveRole(config.RoleCode)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !r.structured() {
-		t.Fatal("a claude role should now be able to enforce a schema")
-	}
-
-	schema := `{"type":"object"}`
-	args := r.args("go", "", "", "", schema)
-	found := ""
-	for i, a := range args {
-		if a == "--json-schema" && i+1 < len(args) {
-			found = args[i+1]
-		}
-	}
-	if found != schema {
-		t.Errorf("--json-schema = %q, want the schema", found)
-	}
-}
-
-func TestAProviderCanTurnSchemaEnforcementOff(t *testing.T) {
-	// For a gateway that mishandles the constrained tool call. The schema then
-	// falls back to being stated in the prompt, which is what it was before.
-	h := newHarness(t, "true", "true")
-	off := false
-	h.eng.SetRoles(
-		map[string]config.Provider{
-			"anthropic": {Kind: config.KindAnthropic},
-			"openai":    {Kind: config.KindOpenAI},
-			"shaky":     {Kind: config.KindAnthropic, BaseURL: "https://gw.example/", Key: "k", EnforceSchema: &off},
-		},
-		map[string]config.Role{
-			"code":      {Agent: config.AgentClaude, Provider: "shaky"},
-			"review":    {Agent: config.AgentCodex, Provider: "openai"},
-			"analyse":   {Agent: config.AgentClaude, Provider: "anthropic"},
-			"architect": {Agent: config.AgentClaude, Provider: "anthropic"},
-			"chat":      {Agent: config.AgentClaude, Provider: "anthropic"},
-		})
-	r, err := h.eng.resolveRole(config.RoleCode)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.structured() {
-		t.Error("the provider turned enforcement off and it stayed on")
-	}
-	for _, a := range r.args("go", "", "", "", `{"type":"object"}`) {
-		if a == "--json-schema" {
-			t.Fatal("enforcement is off, so the flag must not appear")
-		}
-	}
-}
-
-func TestAProviderCanRaiseTheOutputCeiling(t *testing.T) {
-	// Claude Code sends max_tokens: 32000 by default, and an endpoint whose
-	// thinking is unbounded can spend the whole allowance before it starts
-	// answering — the reply then truncates mid-stream. This is the way to give
-	// it headroom without touching the roles that do not need it.
-	h := newHarness(t, "true", "true")
-	h.eng.SetRoles(
-		map[string]config.Provider{
-			"anthropic": {Kind: config.KindAnthropic},
-			"openai":    {Kind: config.KindOpenAI},
-			"gw": {Kind: config.KindAnthropic, BaseURL: "https://gw.example/", Key: "k",
-				MaxOutputTokens: 100000},
-		},
-		map[string]config.Role{
-			"code":      {Agent: config.AgentClaude, Provider: "gw"},
-			"review":    {Agent: config.AgentCodex, Provider: "openai"},
-			"analyse":   {Agent: config.AgentClaude, Provider: "anthropic"},
-			"architect": {Agent: config.AgentClaude, Provider: "anthropic"},
-			"chat":      {Agent: config.AgentClaude, Provider: "anthropic"},
-		})
-
-	raised, err := h.eng.resolveRole(config.RoleCode)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := raised.Env[agent.ClaudeMaxOutputEnv]; got != "100000" {
-		t.Errorf("%s = %q, want 100000", agent.ClaudeMaxOutputEnv, got)
-	}
-
-	// A provider that says nothing leaves the CLI's own default alone.
-	plain, err := h.eng.resolveRole(config.RoleAnalyse)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := plain.Env[agent.ClaudeMaxOutputEnv]; ok {
-		t.Errorf("env = %v, want no ceiling imposed", plain.Env)
-	}
-}

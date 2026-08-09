@@ -27,22 +27,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 `)
 }
 
-// slowChat answers after a pause. Slow enough that a second request lands while
-// the first is still running, and finite so the detached turn finishes before
-// the test's temporary data dir is removed. A turn that outlives its test races
-// its own cleanup, which is a flake under -race rather than a bug in the thing
-// being tested — and blockingClaude, which hangs until it is killed, cannot be
-// waited on at all.
-func slowChat(t *testing.T) string {
-	t.Helper()
-	return writeScript(t, "claude", `
-sleep 2
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"chat-sess"}'
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]},"session_id":"chat-sess"}'
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"chat-sess"}'
-`)
-}
-
 func waitForChatTurns(t *testing.T, h *harness, chatID int64, n int) []store.ChatTurn {
 	t.Helper()
 	var turns []store.ChatTurn
@@ -111,17 +95,7 @@ func TestOpenChatReturnsTheSameConversationEveryTime(t *testing.T) {
 func TestAskRefusesWhileAReplyIsInFlight(t *testing.T) {
 	// Two turns interleaved into one session would make the transcript a
 	// record of something that did not happen in that order.
-	//
-	// A slow agent rather than one that hangs until it is killed: the turn is
-	// detached on purpose, so a test that returns while it still runs races its
-	// own TempDir cleanup — which is a flake under -race, not a bug in the
-	// thing under test. This one finishes, so Wait can be waited on.
-	h := newHarness(t, writeScript(t, "claude", `
-sleep 3
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"chat-sess"}'
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]},"session_id":"chat-sess"}'
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"chat-sess"}'
-`), "true")
+	h := newHarness(t, blockingClaude(t), "true")
 	ctx := context.Background()
 	chat := openChat(t, h)
 
@@ -132,8 +106,6 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 	if err := h.eng.Ask(ctx, chat.ID, "second"); err == nil {
 		t.Error("a second question should be refused while the first is unanswered")
 	}
-	// Let the detached turn finish before the temporary data dir goes away.
-	h.eng.Wait()
 }
 
 func TestAFailedChatTurnKeepsTheConversation(t *testing.T) {
@@ -465,7 +437,7 @@ func TestPullingTwiceDoesNotReproposeWhatWasAlreadyFiled(t *testing.T) {
 func TestPullRefusesWhileAnotherPullIsRunning(t *testing.T) {
 	// Two pulls of one conversation would both spend money producing the same
 	// list, and the operator would review it twice.
-	h := newHarness(t, slowChat(t), "true")
+	h := newHarness(t, blockingClaude(t), "true")
 	ctx := context.Background()
 	chat := openChat(t, h)
 	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
@@ -480,13 +452,12 @@ func TestPullRefusesWhileAnotherPullIsRunning(t *testing.T) {
 	if _, err := h.eng.PullActions(ctx, chat.ID); err == nil {
 		t.Error("a second pull should be refused while the first is running")
 	}
-	h.eng.Wait()
 }
 
 func TestPullRefusesWhileAReplyIsStillComing(t *testing.T) {
 	// Extracting from a half-finished exchange records decisions from a
 	// conversation that has not happened yet.
-	h := newHarness(t, slowChat(t), "true")
+	h := newHarness(t, blockingClaude(t), "true")
 	ctx := context.Background()
 	chat := openChat(t, h)
 	if err := h.eng.Ask(ctx, chat.ID, "what about X?"); err != nil {
@@ -496,7 +467,6 @@ func TestPullRefusesWhileAReplyIsStillComing(t *testing.T) {
 	if _, err := h.eng.PullActions(ctx, chat.ID); err == nil {
 		t.Error("a pull should be refused while a reply is in flight")
 	}
-	h.eng.Wait()
 }
 
 // The whole premise, end to end: talk, pull, queue real tasks, keep talking,

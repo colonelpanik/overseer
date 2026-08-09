@@ -1,8 +1,6 @@
 package agent
 
 import (
-	"bytes"
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -295,35 +293,5 @@ func TestParseDesignReadsTheSubject(t *testing.T) {
 	}
 	if got := tasks[0].SubjectOrEmpty(); got != "Scaffold the module" {
 		t.Errorf("subject = %q, want the one in the response", got)
-	}
-}
-
-func TestDesignSchemaIsTheProposalSchemaPlusTheDesign(t *testing.T) {
-	// Derived rather than written out a second time: the task half is the same
-	// contract whichever door it comes through, and two copies of it would
-	// drift the first time one is edited.
-	var got map[string]any
-	if err := json.Unmarshal(DesignSchema, &got); err != nil {
-		t.Fatalf("DesignSchema is not valid JSON: %v", err)
-	}
-	props, _ := got["properties"].(map[string]any)
-	if _, ok := props["design"]; !ok {
-		t.Error("no design property")
-	}
-	if _, ok := props["tasks"]; !ok {
-		t.Error("no tasks property")
-	}
-
-	req := map[string]bool{}
-	for _, r := range got["required"].([]any) {
-		req[r.(string)] = true
-	}
-	if !req["design"] || !req["tasks"] {
-		t.Errorf("required = %v, want both", got["required"])
-	}
-	// The task contract itself is untouched.
-	if !bytes.Contains(DesignSchema, []byte("blocking_severity")) ||
-		!bytes.Contains(DesignSchema, []byte("depends_on")) {
-		t.Error("the task schema was lost on the way")
 	}
 }

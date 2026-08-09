@@ -13,13 +13,6 @@ const (
 // inline in the config — reaches codex the same way either way.
 const CodexKeyEnv = "OVERSEER_PROVIDER_KEY"
 
-// ClaudeMaxOutputEnv raises the ceiling on one Claude reply.
-//
-// A variable rather than a flag because `claude -p` has no flag for it. The
-// name was confirmed by watching the wire: with it set, the max_tokens the CLI
-// sends changes from its default of 32000 to the value given.
-const ClaudeMaxOutputEnv = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
-
 // ProviderEnv returns the environment overrides that point one agent CLI at a
 // particular endpoint.
 //

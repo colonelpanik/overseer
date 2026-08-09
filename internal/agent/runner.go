@@ -231,41 +231,6 @@ func (r *Runner) Run(ctx context.Context, spec RunSpec) (Result, error) {
 	return res, nil
 }
 
-// foldEvent accumulates one event into a Result.
-//
-// Split out from the read loop so the folding can be tested against a stream
-// without a subprocess — the rule about structured output below is not
-// something anyone should have to discover from a live run.
-func foldEvent(res *Result, ev Event) {
-	switch ev.Kind {
-	case EventInit:
-		if ev.SessionID != "" {
-			res.SessionID = ev.SessionID
-		}
-	case EventMessage:
-		if ev.Text != "" {
-			res.FinalText = ev.Text
-		}
-	case EventResult:
-		// A validated object displaces whatever prose came before it. That is
-		// the point of asking for a schema: the answer is the thing the CLI
-		// checked, not the commentary the model wrote alongside it.
-		if ev.Structured != "" {
-			res.FinalText = ev.Structured
-		}
-		res.CostUSD += ev.CostUSD
-		res.InputTokens += ev.InputTokens
-		res.OutputTokens += ev.OutputTokens
-		if ev.ErrMsg != "" && res.ErrMsg == "" {
-			res.ErrMsg = ev.ErrMsg
-		}
-	case EventError, EventRateLimit:
-		if ev.ErrMsg != "" && res.ErrMsg == "" {
-			res.ErrMsg = ev.ErrMsg
-		}
-	}
-}
-
 // consume reads JSONL from stdout, mirrors it to the transcript, and folds
 // each event into res.
 func (r *Runner) consume(stdout io.Reader, transcript io.Writer, onEvent func(Event), res *Result) error {
@@ -297,7 +262,27 @@ func (r *Runner) consume(stdout io.Reader, transcript io.Writer, onEvent func(Ev
 			// separately.
 			continue
 		}
-		foldEvent(res, ev)
+		switch ev.Kind {
+		case EventInit:
+			if ev.SessionID != "" {
+				res.SessionID = ev.SessionID
+			}
+		case EventMessage:
+			if ev.Text != "" {
+				res.FinalText = ev.Text
+			}
+		case EventResult:
+			res.CostUSD += ev.CostUSD
+			res.InputTokens += ev.InputTokens
+			res.OutputTokens += ev.OutputTokens
+			if ev.ErrMsg != "" && res.ErrMsg == "" {
+				res.ErrMsg = ev.ErrMsg
+			}
+		case EventError, EventRateLimit:
+			if ev.ErrMsg != "" && res.ErrMsg == "" {
+				res.ErrMsg = ev.ErrMsg
+			}
+		}
 		if ev.SessionID != "" && res.SessionID == "" {
 			res.SessionID = ev.SessionID
 		}

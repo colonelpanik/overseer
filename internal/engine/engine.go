@@ -617,7 +617,7 @@ func (e *Engine) runClaude(ctx context.Context, task *store.Task, phase, prompt,
 	if err != nil {
 		return &loop.Outcome{Failed: true, ErrMsg: err.Error()}, nil
 	}
-	res, _, err := e.runAgent(ctx, task, phase, role, role.args(prompt, resume, "", "", ""))
+	res, _, err := e.runAgent(ctx, task, phase, role, role.args(prompt, resume, "", ""))
 	if err != nil {
 		return nil, err
 	}
@@ -652,7 +652,7 @@ func (e *Engine) runCodex(ctx context.Context, task *store.Task, phase, prompt s
 		prompt = withInlineSchema(prompt)
 	}
 
-	res, step, err := e.runAgent(ctx, task, phase, role, role.args(prompt, "", schemaPath, lastPath, string(agent.VerdictSchema)))
+	res, step, err := e.runAgent(ctx, task, phase, role, role.args(prompt, "", schemaPath, lastPath))
 	if err != nil {
 		return nil, err
 	}
@@ -668,7 +668,7 @@ func (e *Engine) runCodex(ctx context.Context, task *store.Task, phase, prompt s
 			parseErr.Error() + "\nRespond with the JSON object required by the " +
 			"output schema and nothing else."
 		res, step, err = e.runAgent(ctx, task, phase, role,
-			role.args(retryPrompt, "", schemaPath, lastPath, string(agent.VerdictSchema)))
+			role.args(retryPrompt, "", schemaPath, lastPath))
 		if err != nil {
 			return nil, err
 		}
