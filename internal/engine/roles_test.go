@@ -418,3 +418,42 @@ func TestAProviderCanTurnSchemaEnforcementOff(t *testing.T) {
 		}
 	}
 }
+
+func TestAProviderCanRaiseTheOutputCeiling(t *testing.T) {
+	// Claude Code sends max_tokens: 32000 by default, and an endpoint whose
+	// thinking is unbounded can spend the whole allowance before it starts
+	// answering — the reply then truncates mid-stream. This is the way to give
+	// it headroom without touching the roles that do not need it.
+	h := newHarness(t, "true", "true")
+	h.eng.SetRoles(
+		map[string]config.Provider{
+			"anthropic": {Kind: config.KindAnthropic},
+			"openai":    {Kind: config.KindOpenAI},
+			"gw": {Kind: config.KindAnthropic, BaseURL: "https://gw.example/", Key: "k",
+				MaxOutputTokens: 100000},
+		},
+		map[string]config.Role{
+			"code":      {Agent: config.AgentClaude, Provider: "gw"},
+			"review":    {Agent: config.AgentCodex, Provider: "openai"},
+			"analyse":   {Agent: config.AgentClaude, Provider: "anthropic"},
+			"architect": {Agent: config.AgentClaude, Provider: "anthropic"},
+			"chat":      {Agent: config.AgentClaude, Provider: "anthropic"},
+		})
+
+	raised, err := h.eng.resolveRole(config.RoleCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := raised.Env[agent.ClaudeMaxOutputEnv]; got != "100000" {
+		t.Errorf("%s = %q, want 100000", agent.ClaudeMaxOutputEnv, got)
+	}
+
+	// A provider that says nothing leaves the CLI's own default alone.
+	plain, err := h.eng.resolveRole(config.RoleAnalyse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := plain.Env[agent.ClaudeMaxOutputEnv]; ok {
+		t.Errorf("env = %v, want no ceiling imposed", plain.Env)
+	}
+}

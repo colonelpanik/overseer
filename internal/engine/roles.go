@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"overseer/internal/agent"
@@ -124,6 +125,15 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 		Writable: roleWrites[name],
 		Confined: e.confining(),
 	}
+	// Claude only: codex sends no output ceiling on the responses API, so there
+	// is nothing there to raise.
+	if provider.MaxOutputTokens > 0 && role.Agent == config.AgentClaude {
+		if r.Env == nil {
+			r.Env = map[string]string{}
+		}
+		r.Env[agent.ClaudeMaxOutputEnv] = strconv.Itoa(provider.MaxOutputTokens)
+	}
+
 	switch role.Agent {
 	case config.AgentCodex:
 		r.Runner = e.Codex

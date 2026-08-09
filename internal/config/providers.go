@@ -95,6 +95,19 @@ type Provider struct {
 	// a constrained tool call, and a gateway that mishandles those would fail
 	// every run with no way back short of changing model.
 	EnforceSchema *bool `yaml:"structured_output"`
+	// MaxOutputTokens raises the ceiling on one reply. Zero leaves the CLI's
+	// own default alone, which is what almost every provider wants.
+	//
+	// It exists for an endpoint whose thinking is unbounded. Claude Code sends
+	// max_tokens: 32000 and thinking: {"type":"adaptive"}; a gateway that
+	// ignores the thinking parameter lets the model spend that whole allowance
+	// before it starts answering, and the reply truncates mid-stream — which
+	// surfaces as degenerate output rather than as a limit being hit. Headroom
+	// is the workaround; the gateway honouring the parameter is the fix.
+	//
+	// Claude only. codex sends no output ceiling on the responses API, so there
+	// is nothing here to raise.
+	MaxOutputTokens int `yaml:"max_output_tokens"`
 	// WireAPI is the protocol an OpenAI-shaped endpoint speaks: "responses" or
 	// "chat". Empty means responses, which is the only one codex 0.147 still
 	// accepts — it refuses wire_api = "chat" at config load. Meaningless for an
@@ -288,6 +301,10 @@ func (c Config) validateProviders() error {
 			if strings.TrimSpace(m) == "" {
 				return fmt.Errorf("provider %q lists an empty model name", name)
 			}
+		}
+		if p.MaxOutputTokens < 0 {
+			return fmt.Errorf("provider %q has max_output_tokens %d, which cannot be negative",
+				name, p.MaxOutputTokens)
 		}
 		switch p.WireAPI {
 		case "", "responses", "chat":

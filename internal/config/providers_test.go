@@ -557,3 +557,39 @@ roles:
 		t.Error("an untouched provider should still enforce schemas")
 	}
 }
+
+func TestMaxOutputTokensIsOptionalAndValidated(t *testing.T) {
+	// Zero means "leave the CLI's own default alone", which is what every
+	// provider that says nothing wants.
+	path := writeConfig(t, `
+providers:
+  gw:
+    kind: anthropic
+    base_url: https://gw.example/
+    key_env: GW_KEY
+    max_output_tokens: 100000
+    models: [some-model]
+roles:
+  analyse: {agent: claude, provider: gw, model: some-model}
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Providers["gw"].MaxOutputTokens; got != 100000 {
+		t.Errorf("MaxOutputTokens = %d, want 100000", got)
+	}
+	if got := c.Providers["anthropic"].MaxOutputTokens; got != 0 {
+		t.Errorf("an untouched provider = %d, want 0 meaning the CLI decides", got)
+	}
+
+	bad := writeConfig(t, `
+providers:
+  gw: {kind: anthropic, base_url: 'https://gw.example/', key_env: GW_KEY, max_output_tokens: -1, models: [m]}
+roles:
+  analyse: {agent: claude, provider: gw, model: m}
+`)
+	if _, err := Load(bad); err == nil {
+		t.Error("a negative ceiling should be refused")
+	}
+}
