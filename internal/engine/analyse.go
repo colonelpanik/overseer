@@ -336,7 +336,7 @@ func (e *Engine) runAnalysisAgent(ctx context.Context, p *store.Proposal, prompt
 		role.Model = p.Model
 	}
 	return role.Runner.Run(ctx, agent.RunSpec{
-		Args:           role.args(prompt, "", "", ""),
+		Args:           role.args(prompt, "", "", "", string(agent.ProposalSchema)),
 		Dir:            p.RepoPath,
 		TranscriptPath: transcript,
 		Timeout:        e.analysisTimeout(),
