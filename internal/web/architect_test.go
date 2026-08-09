@@ -160,4 +160,7 @@ func TestDesigningANewProjectCreatesTheRepository(t *testing.T) {
 	if props[0].RepoPath != path {
 		t.Errorf("RepoPath = %q, want %q", props[0].RepoPath, path)
 	}
+	// The brief, plus whatever the background reply turned into. Without this
+	// the test races its own TempDir cleanup.
+	waitForArchitectTurns(t, st, props[0].ID, 2)
 }

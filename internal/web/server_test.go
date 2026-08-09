@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"overseer/internal/config"
 	"overseer/internal/engine"
@@ -19,6 +20,13 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
+	// These tests exercise handlers and rendering, never an agent. Left at the
+	// defaults they would find a real claude or codex on the developer's PATH
+	// and start a paid conversation in the background — which then races the
+	// test's own TempDir cleanup. Pointing at a binary that cannot exist makes
+	// every background turn fail immediately and identically everywhere.
+	cfg.ClaudeBin = filepath.Join(cfg.DataDir, "no-such-claude")
+	cfg.CodexBin = filepath.Join(cfg.DataDir, "no-such-codex")
 
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
@@ -33,6 +41,30 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 		t.Fatal(err)
 	}
 	return New(cfg, st, eng, filepath.Join(cfg.DataDir, "config.yaml")), st
+}
+
+// waitForArchitectTurns blocks until a conversation has recorded at least n
+// turns.
+//
+// Starting a design replies in the background, and that goroutine writes into
+// the proposal's run directory under the daemon's data dir — which is
+// t.TempDir(). A test that returns while it is still running races its own
+// cleanup, and RemoveAll fails on a directory the goroutine is still filling.
+// Waiting for the turn it ends with is the synchronisation point.
+func waitForArchitectTurns(t *testing.T, st *store.Store, proposalID int64, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		turns, err := st.ArchitectTurns(context.Background(), proposalID)
+		if err != nil {
+			t.Fatalf("ArchitectTurns: %v", err)
+		}
+		if len(turns) >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("proposal %d never reached %d turns", proposalID, n)
 }
 
 func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
