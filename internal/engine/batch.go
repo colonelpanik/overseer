@@ -19,7 +19,11 @@ import (
 // parsed task file or was built directly (as the engine's own tests do). The
 // yaml tags let ParseBatch decode a task file straight into this shape.
 type BatchTask struct {
-	Repo             string   `yaml:"repo"`
+	Repo string `yaml:"repo"`
+	// Subject is the one line the task is listed under. Optional: a task file
+	// that gives only a goal gets a subject derived from it, which is what
+	// every existing task file relies on.
+	Subject          string   `yaml:"subject"`
 	Goal             string   `yaml:"goal"`
 	Constraints      []string `yaml:"constraints"`
 	BlockingSeverity string   `yaml:"blocking_severity"`
@@ -121,10 +125,32 @@ func (e *Engine) Submit(ctx context.Context, bt BatchTask) (store.Task, error) {
 		depIDs = append(depIDs, dep.ID)
 	}
 
-	base := worktree.Slugify(bt.Goal)
+	// The subject is what the task is listed under: the one somebody supplied,
+	// tidied, or one derived from the goal when nobody did.
+	subject := store.SubjectOr(bt.Subject, bt.Goal)
+
+	// The SLUG asks a different question — was a subject supplied at all? —
+	// and that asymmetry is the compatibility guarantee. A slug names a branch,
+	// a worktree directory and, in a task file, the thing a depends_on refers
+	// to, so every task file already written has to keep resolving. None of them
+	// can carry a subject, because the field did not exist, so all of them slug
+	// from the goal exactly as before. A task that does supply one is either new
+	// or came from an analysis, where dependencies resolve by created ID rather
+	// than by name.
+	//
+	// When there is one, the slug is built from the NORMALISED subject rather
+	// than the raw field, so the branch matches the line the board shows. A
+	// subject that arrived with a newline or a second sentence in it is repaired
+	// once, and both readers see the repair.
+	slugFrom := bt.Goal
+	if strings.TrimSpace(bt.Subject) != "" {
+		slugFrom = subject
+	}
+	base := worktree.Slugify(slugFrom)
 	task := store.Task{
 		RepoID:           repo.ID,
 		RepoPath:         repo.Path,
+		Subject:          subject,
 		Goal:             strings.TrimSpace(bt.Goal),
 		Constraints:      strings.Join(bt.Constraints, "\n"),
 		State:            string(loop.StateQueued),
@@ -351,6 +377,10 @@ func (e *Engine) Restart(ctx context.Context, taskID int64, opts RestartOpts) er
 	next.MaxIterations = e.Cfg.MaxIterations
 	if strings.TrimSpace(opts.Goal) != "" {
 		next.Goal = strings.TrimSpace(opts.Goal)
+		// The subject described the goal that has just been replaced, so it is
+		// re-derived rather than carried: a task listed under work nobody asked
+		// for is worse than no subject at all.
+		next.Subject = store.Subject(next.Goal)
 	}
 	if len(opts.Constraints) > 0 {
 		next.Constraints = strings.Join(opts.Constraints, "\n")

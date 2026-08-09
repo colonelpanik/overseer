@@ -19,8 +19,15 @@ type Task struct {
 	// RepoID links the task to its registered repository. RepoPath stays
 	// alongside it as the resolved path, so every existing reader keeps
 	// working and the migration is additive.
-	RepoID           int64
-	RepoPath         string
+	RepoID   int64
+	RepoPath string
+	// Subject is the one line the task is listed under; Goal is the whole
+	// instruction and may be a paragraph. An analysis writes both. Empty
+	// means nobody supplied one, and Headline derives it from the goal.
+	//
+	// SaveTask deliberately does not write it, for the same reason it does not
+	// write Goal — see the note there.
+	Subject          string
 	Goal             string
 	Constraints      string
 	State            string
@@ -97,13 +104,13 @@ func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
 	}
 
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO tasks (slug, repo_id, repo_path, goal, constraints, state, phase,
+		INSERT INTO tasks (slug, repo_id, repo_path, subject, goal, constraints, state, phase,
 			iteration, max_iterations, blocking_severity, plan_session_id,
 			exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
 			worktree_dir, pr_url, err_msg, verify_command,
 			finding_hashes, cost_cap_usd, run_seq, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.Slug, t.RepoID, t.RepoPath, t.Goal, t.Constraints, t.State, t.Phase,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.Slug, t.RepoID, t.RepoPath, t.Subject, t.Goal, t.Constraints, t.State, t.Phase,
 		t.Iteration, t.MaxIterations, t.BlockingSeverity, t.PlanSessionID,
 		t.ExecSessionID, t.Branch, t.BaseRef, t.GitCommonDir, t.GitAdminDir,
 		t.WorktreeDir, t.PRURL, t.ErrMsg, t.VerifyCommand,
@@ -120,7 +127,7 @@ func (s *Store) CreateTask(ctx context.Context, t Task) (Task, error) {
 	return t, nil
 }
 
-const taskColumns = `id, slug, repo_id, repo_path, goal, constraints, state, phase,
+const taskColumns = `id, slug, repo_id, repo_path, subject, goal, constraints, state, phase,
 	iteration, max_iterations, blocking_severity, plan_session_id,
 	exec_session_id, branch, base_ref, git_common_dir, git_admin_dir,
 	worktree_dir, pr_url, err_msg, verify_command, finding_hashes,
@@ -129,7 +136,7 @@ const taskColumns = `id, slug, repo_id, repo_path, goal, constraints, state, pha
 func scanTask(sc interface{ Scan(...any) error }) (Task, error) {
 	var t Task
 	var hashes, stopped, created, updated string
-	err := sc.Scan(&t.ID, &t.Slug, &t.RepoID, &t.RepoPath, &t.Goal, &t.Constraints,
+	err := sc.Scan(&t.ID, &t.Slug, &t.RepoID, &t.RepoPath, &t.Subject, &t.Goal, &t.Constraints,
 		&t.State, &t.Phase, &t.Iteration, &t.MaxIterations,
 		&t.BlockingSeverity, &t.PlanSessionID, &t.ExecSessionID, &t.Branch,
 		&t.BaseRef, &t.GitCommonDir, &t.GitAdminDir,
@@ -262,12 +269,12 @@ func (s *Store) RestartTask(ctx context.Context, t Task) error {
 	t.UpdatedAt = time.Now().UTC()
 	return s.touchTask(ctx, t.ID, `
 		UPDATE tasks SET state=?, phase=?, iteration=?, max_iterations=?,
-			goal=?, constraints=?, plan_session_id='', exec_session_id='',
+			subject=?, goal=?, constraints=?, plan_session_id='', exec_session_id='',
 			branch='', base_ref='', git_common_dir='', git_admin_dir='',
 			worktree_dir='', err_msg='', finding_hashes='',
 			stopped_at='', run_seq=run_seq+1, updated_at=?
 		WHERE id=?`,
-		t.State, t.Phase, t.Iteration, t.MaxIterations, t.Goal, t.Constraints)
+		t.State, t.Phase, t.Iteration, t.MaxIterations, t.Subject, t.Goal, t.Constraints)
 }
 
 // ClearExecSession forgets the execution session, so the next exec turn starts
@@ -318,7 +325,7 @@ func (s *Store) queryTasks(ctx context.Context, q string, args ...any) ([]Task, 
 
 // SaveTask writes every mutable field of t and bumps updated_at.
 //
-// stopped_at and run_seq are deliberately absent. Every caller holds a copy of
+// stopped_at, run_seq, goal and subject are deliberately absent. Every caller holds a copy of
 // the row read before the operator touched anything, so writing those columns
 // here would silently revert a stop — or a restart — landing while a worker was
 // mid-step. That is the exact lost update they exist to survive, and it cannot

@@ -127,15 +127,27 @@ func (f *FakeOpener) Recorded() []PRRequest {
 	return append([]PRRequest(nil), f.Calls...)
 }
 
-// PRTitle derives a PR title from a task goal: its first line, capped to 72
-// characters.
-func PRTitle(goal string) string {
-	title := strings.TrimSpace(goal)
+// PRTitle derives a pull request title from a task's headline: its first line,
+// capped to 72 runes.
+//
+// Runes, not bytes, and that is not a nicety. The engine hands this an
+// already-clamped subject, which store.Subject bounds to 72 RUNES — so a
+// headline of 71 runes with a few multi-byte characters in it is comfortably
+// over 72 bytes. A byte cap fires on a string that is already the right length
+// and cuts it in the middle of a character.
+//
+// The clamp duplicates store.Subject's. Deliberately: these two packages sit
+// side by side with no dependency between them, and worktree — git plumbing —
+// importing the persistence package to shorten a string would be the wrong way
+// round. agent.validSeverities duplicates config.ValidSeverities for the same
+// reason and says so.
+func PRTitle(headline string) string {
+	title := strings.TrimSpace(headline)
 	if i := strings.IndexByte(title, '\n'); i >= 0 {
 		title = strings.TrimSpace(title[:i])
 	}
-	if len(title) > 72 {
-		title = strings.TrimSpace(title[:69]) + "..."
+	if r := []rune(title); len(r) > 72 {
+		title = strings.TrimSpace(string(r[:69])) + "..."
 	}
 	if title == "" {
 		return "overseer task"

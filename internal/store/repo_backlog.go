@@ -33,9 +33,12 @@ const (
 
 // BacklogItem is one thing worth doing to a repository that nothing is doing.
 type BacklogItem struct {
-	ID       int64
-	RepoID   int64
-	Source   string
+	ID     int64
+	RepoID int64
+	Source string
+	// Subject is the one line this is listed under, when whatever raised it
+	// wrote one. Title is the full text, and stays the basis of Fingerprint.
+	Subject  string
 	Title    string
 	Detail   string
 	Evidence []string
@@ -57,7 +60,7 @@ type BacklogItem struct {
 	UpdatedAt     time.Time
 }
 
-const backlogColumns = `id, repo_id, source, title, detail, evidence, severity,
+const backlogColumns = `id, repo_id, source, subject, title, detail, evidence, severity,
 	fingerprint, seen, proposal_task_id, finding_id, origin_task_id, state,
 	created_task_id, created_at, updated_at`
 
@@ -78,7 +81,7 @@ func Fingerprint(title string) string {
 func scanBacklogItem(sc interface{ Scan(...any) error }) (BacklogItem, error) {
 	var b BacklogItem
 	var evidence, created, updated string
-	err := sc.Scan(&b.ID, &b.RepoID, &b.Source, &b.Title, &b.Detail, &evidence,
+	err := sc.Scan(&b.ID, &b.RepoID, &b.Source, &b.Subject, &b.Title, &b.Detail, &evidence,
 		&b.Severity, &b.Fingerprint, &b.Seen, &b.ProposalTaskID, &b.FindingID,
 		&b.OriginTaskID, &b.State, &b.CreatedTaskID, &created, &updated)
 	if err != nil {
@@ -118,13 +121,25 @@ func (s *Store) AddBacklogItem(ctx context.Context, b BacklogItem) (BacklogItem,
 	existing, err := s.backlogByFingerprint(ctx, b.RepoID, b.Fingerprint)
 	switch {
 	case err == nil:
+		// An item raised again can arrive better described than the row already
+		// there: every row filed before this column existed has no subject, and
+		// whatever is raising it now may have one. Fill an empty subject in —
+		// but never overwrite a subject that is already set. A later model's
+		// phrasing is not better than an earlier one's, and a headline that
+		// changes under the operator on every re-analysis is worse than either.
+		subject := existing.Subject
+		if strings.TrimSpace(subject) == "" {
+			subject = strings.TrimSpace(b.Subject)
+		}
 		_, err := s.db.ExecContext(ctx, `
-			UPDATE backlog SET seen = seen + 1, updated_at = ? WHERE id = ?`,
-			time.Now().UTC().Format(rfc3339), existing.ID)
+			UPDATE backlog SET seen = seen + 1, subject = ?, updated_at = ?
+			WHERE id = ?`,
+			subject, time.Now().UTC().Format(rfc3339), existing.ID)
 		if err != nil {
 			return BacklogItem{}, fmt.Errorf("bump backlog item: %w", err)
 		}
 		existing.Seen++
+		existing.Subject = subject
 		return existing, nil
 	case !errors.Is(err, ErrNotFound):
 		return BacklogItem{}, err
@@ -133,11 +148,11 @@ func (s *Store) AddBacklogItem(ctx context.Context, b BacklogItem) (BacklogItem,
 	now := time.Now().UTC()
 	b.CreatedAt, b.UpdatedAt, b.Seen = now, now, 1
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO backlog (repo_id, source, title, detail, evidence, severity,
+		INSERT INTO backlog (repo_id, source, subject, title, detail, evidence, severity,
 			fingerprint, seen, proposal_task_id, finding_id, origin_task_id,
 			state, created_task_id, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.RepoID, b.Source, b.Title, b.Detail, strings.Join(b.Evidence, "\n"),
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.RepoID, b.Source, b.Subject, b.Title, b.Detail, strings.Join(b.Evidence, "\n"),
 		b.Severity, b.Fingerprint, b.Seen, b.ProposalTaskID, b.FindingID,
 		b.OriginTaskID, b.State, b.CreatedTaskID,
 		now.Format(rfc3339), now.Format(rfc3339))
@@ -181,10 +196,10 @@ func (s *Store) GetBacklogItem(ctx context.Context, id int64) (BacklogItem, erro
 func (s *Store) SaveBacklogItem(ctx context.Context, b BacklogItem) error {
 	b.UpdatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE backlog SET title=?, detail=?, evidence=?, severity=?,
+		UPDATE backlog SET subject=?, title=?, detail=?, evidence=?, severity=?,
 			state=?, created_task_id=?, updated_at=?
 		WHERE id=?`,
-		b.Title, b.Detail, strings.Join(b.Evidence, "\n"), b.Severity,
+		b.Subject, b.Title, b.Detail, strings.Join(b.Evidence, "\n"), b.Severity,
 		b.State, b.CreatedTaskID, b.UpdatedAt.Format(rfc3339), b.ID)
 	if err != nil {
 		return fmt.Errorf("update backlog item: %w", err)

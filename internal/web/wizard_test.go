@@ -405,3 +405,65 @@ func TestWizardStateSurvivesTheReloadTheDaemonTriggers(t *testing.T) {
 		t.Error("the wizard should still show its proposals")
 	}
 }
+
+func TestPostAnalyseTaskEditsTheSubject(t *testing.T) {
+	// The review step is where an operator fixes a subject the model got
+	// wrong, and it is the only place they can.
+	s, st := newTestServer(t)
+	ctx := context.Background()
+	p := readyProposal(t, st)
+
+	rec := post(t, s, "/analyse/1/task/1", url.Values{
+		"action": {"save"}, "subject": {"Cache the inventory join"},
+		"goal": {"Add a cached projection of the inventory join. It recomputes per request."},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	after, err := st.ProposalTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after[0].Subject != "Cache the inventory join" {
+		t.Errorf("Subject = %q, want the edited subject", after[0].Subject)
+	}
+}
+
+func TestTheProposedTaskListLeadsWithTheSubject(t *testing.T) {
+	s, st := newTestServer(t)
+	ctx := context.Background()
+	const subject = "Cache the rack inventory query"
+	const goal = "Add a cached projection of the rack inventory query. The view " +
+		"recomputes the whole join on every request, which will not hold."
+
+	p, err := st.CreateProposal(ctx, store.Proposal{
+		RepoPath: "/home/kal/code/dc-planner", State: store.ProposalReady, MaxTasks: 12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceProposalTasks(ctx, p.ID, []store.ProposalTask{{
+		Ord: 0, Key: "cache", Subject: subject, Goal: goal,
+		Severity: "any", Selected: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := get(t, s, "/?wizard=1").Body.String()
+	if want := `<div class="goal">` + subject + `</div>`; !strings.Contains(body, want) {
+		t.Errorf("the proposed task does not lead with its subject; want %s", want)
+	}
+	if strings.Contains(body, `<div class="goal">Add a cached projection`) {
+		t.Error("the proposed task is still rendering the whole goal as its headline")
+	}
+	if want := `<div class="taskbody">` + goal + `</div>`; !strings.Contains(body, want) {
+		t.Errorf("the proposed task does not show the goal beneath it; want %s", want)
+	}
+	// The edit form offers both, because a subject the model got wrong is only
+	// fixable here.
+	for _, want := range []string{`name="subject"`, `name="goal"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the edit form has no %s field", want)
+		}
+	}
+}

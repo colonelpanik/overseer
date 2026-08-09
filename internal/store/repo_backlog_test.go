@@ -291,3 +291,113 @@ func TestSaveBacklogItemBumpsUpdatedAt(t *testing.T) {
 		t.Errorf("UpdatedAt %v predates CreatedAt %v", got.UpdatedAt, got.CreatedAt)
 	}
 }
+
+func TestBacklogSubjectRoundTripsAndDoesNotMoveTheFingerprint(t *testing.T) {
+	// The fingerprint is what collapses the same item raised twice into one
+	// row, and it is taken from the title. The subject rides alongside so the
+	// list can be read without changing what makes two items the same item.
+	st := newTestStore(t)
+	ctx := context.Background()
+	repo := testRepo(t, st, "/src/widget")
+
+	item, err := st.AddBacklogItem(ctx, BacklogItem{
+		RepoID: repo.ID, Source: BacklogAnalysis,
+		Subject: "Cache the rack inventory query",
+		Title:   "Add a cached projection of the rack inventory query. It recomputes the whole join per request.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Fingerprint != Fingerprint(item.Title) {
+		t.Error("the fingerprint should still come from the title")
+	}
+	got, err := st.GetBacklogItem(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want it stored", got.Subject)
+	}
+	if got.Headline() != "Cache the rack inventory query" {
+		t.Errorf("Headline = %q, want the subject", got.Headline())
+	}
+
+	// Raised again: one row, seen twice, not a second row.
+	again, err := st.AddBacklogItem(ctx, BacklogItem{
+		RepoID: repo.ID, Source: BacklogAnalysis,
+		Subject: "Cache the rack inventory query", Title: item.Title,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != item.ID || again.Seen != 2 {
+		t.Errorf("item = %+v, want the same row seen twice", again)
+	}
+}
+
+func TestRaisingAnItemAgainFillsInAMissingSubject(t *testing.T) {
+	// A row filed before the column existed, met by an analysis that now writes
+	// a subject. The fingerprint says it is the same item, so it is enriched
+	// rather than duplicated — and rather than left on a derived headline for
+	// good when a better one has arrived.
+	st := newTestStore(t)
+	ctx := context.Background()
+	repo := testRepo(t, st, "/src/widget")
+	title := "Add a cached projection of the rack inventory query. It recomputes the whole join per request."
+
+	first, err := st.AddBacklogItem(ctx, BacklogItem{
+		RepoID: repo.ID, Source: BacklogAnalysis, Title: title,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Subject != "" {
+		t.Fatalf("Subject = %q, want empty on the migration-era row", first.Subject)
+	}
+
+	second, err := st.AddBacklogItem(ctx, BacklogItem{
+		RepoID: repo.ID, Source: BacklogAnalysis, Title: title,
+		Subject: "Cache the rack inventory query",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID || second.Seen != 2 {
+		t.Fatalf("item = %+v, want the same row seen twice", second)
+	}
+	if second.Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want the later subject filled in", second.Subject)
+	}
+
+	// A third raising with different words leaves the subject alone: a headline
+	// that moves under the operator on every analysis is worse than one that is
+	// merely not the best available.
+	third, err := st.AddBacklogItem(ctx, BacklogItem{
+		RepoID: repo.ID, Source: BacklogAnalysis, Title: title,
+		Subject: "Something else entirely",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want the first subject kept", third.Subject)
+	}
+
+	// The returned struct and the row have to agree.
+	got, err := st.GetBacklogItem(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "Cache the rack inventory query" || got.Seen != 3 {
+		t.Errorf("row = %+v, want the subject kept and seen 3", got)
+	}
+}
+
+func TestBacklogHeadlineFallsBackToTheTitle(t *testing.T) {
+	// Review findings and hand-written items have no subject; their titles are
+	// already short, and a derived headline must not mangle them.
+	item := BacklogItem{Title: "Unhandled error from os.ReadFile"}
+	if got := item.Headline(); got != "Unhandled error from os.ReadFile" {
+		t.Errorf("Headline = %q, want the title unchanged", got)
+	}
+}

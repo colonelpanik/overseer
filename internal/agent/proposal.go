@@ -35,8 +35,15 @@ func mustReadProposalSchema() []byte {
 // zero value. An absent "goal" decoding to "" would otherwise produce a task
 // with no instruction in it, which the loop would happily start spending money
 // on.
+//
+// Subject is the exception to the strictness the rest of this type is built
+// for. It is the one line a task is listed under, and a response without one
+// is accepted: the caller derives a subject from the goal instead. Failing a
+// whole repository analysis over a missing title would trade thirty minutes of
+// reading for a string we can compute.
 type ProposedTask struct {
 	Key         *string  `json:"key"`
+	Subject     *string  `json:"subject"`
 	Goal        *string  `json:"goal"`
 	Constraints []string `json:"constraints"`
 	Verify      *string  `json:"verify"`
@@ -48,9 +55,10 @@ type ProposedTask struct {
 }
 
 // KeyOrEmpty and friends read a field that has passed validation.
-func (p ProposedTask) KeyOrEmpty() string    { return deref(p.Key) }
-func (p ProposedTask) GoalOrEmpty() string   { return deref(p.Goal) }
-func (p ProposedTask) VerifyOrEmpty() string { return deref(p.Verify) }
+func (p ProposedTask) KeyOrEmpty() string     { return deref(p.Key) }
+func (p ProposedTask) SubjectOrEmpty() string { return deref(p.Subject) }
+func (p ProposedTask) GoalOrEmpty() string    { return deref(p.Goal) }
+func (p ProposedTask) VerifyOrEmpty() string  { return deref(p.Verify) }
 
 // SeverityOrDefault returns the proposed threshold, falling back to the
 // loosest one rather than to the empty string, which is not a valid setting.

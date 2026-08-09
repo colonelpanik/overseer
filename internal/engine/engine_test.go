@@ -656,3 +656,38 @@ func TestFailTaskClosesOutAGenuineHarnessError(t *testing.T) {
 		}
 	}
 }
+
+func TestPullRequestTitleIsTheSubjectNotTheWholeGoal(t *testing.T) {
+	// PRTitle used to cut the goal off at 72 bytes with an ellipsis, which for
+	// an analysis-written task meant a pull request titled with half of a
+	// sentence.
+	h := newHarness(t,
+		fakeClaude(t, `echo 'package main' > added.go`),
+		fakeCodex(t, `{"verdict":"approved","findings":[]}`))
+	ctx := context.Background()
+
+	// Through Submit rather than h.submit: the harness's shortcut writes the
+	// row directly and would not fill the subject in.
+	task, err := h.eng.Submit(ctx, BatchTask{
+		Repo:    h.repo,
+		Subject: "Cache the rack inventory query",
+		Goal:    "Add a cached projection of the rack inventory query. " + strings.Repeat("More detail. ", 20),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.RunTask(ctx, task.ID); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	calls := h.pr.Recorded()
+	if len(calls) != 1 {
+		t.Fatalf("pr calls = %d, want 1", len(calls))
+	}
+	if calls[0].Title != "Cache the rack inventory query" {
+		t.Errorf("PR title = %q, want the task's subject", calls[0].Title)
+	}
+	if !strings.Contains(calls[0].Body, "Add a cached projection") {
+		t.Error("the PR body should still carry the whole goal")
+	}
+}

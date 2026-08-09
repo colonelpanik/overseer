@@ -434,3 +434,140 @@ func TestTimelineOpensTheRunningStepAndTheOperatorCanCollapseIt(t *testing.T) {
 		t.Error("an explicit collapse must not be overridden by the default")
 	}
 }
+
+// Every assertion here is scoped to the element that renders the thing, closing
+// tag included. A bare strings.Contains against the whole page cannot tell the
+// row from the detail pane — and worse, a derived headline is a PREFIX of the
+// goal it came from, so an unscoped check passes against a template that was
+// never touched.
+func TestTheTaskRowLeadsWithTheSubjectAndTheDetailKeepsTheGoal(t *testing.T) {
+	s, st := newTestServer(t)
+	const subject = "Cache the rack inventory query"
+	const goal = "Add a cached projection of the rack inventory query. The view " +
+		"recomputes the whole join on every request, which will not hold."
+	if _, err := st.CreateTask(context.Background(), store.Task{
+		Slug: "cache-the-rack-inventory-query", RepoPath: "/tmp/repo",
+		Subject: subject, Goal: goal,
+		State: "queued", MaxIterations: 10, BlockingSeverity: "any",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := get(t, s, "/?sel=1").Body.String()
+
+	// The row. With the template unedited this span holds the whole paragraph,
+	// so the closing tag is what gives the assertion its teeth.
+	if want := `<span class="goal">` + subject + `</span>`; !strings.Contains(body, want) {
+		t.Errorf("the task row does not lead with the subject; want %s", want)
+	}
+	if strings.Contains(body, `<span class="goal">Add a cached projection`) {
+		t.Error("the task row is still rendering the whole goal as its headline")
+	}
+	// The detail heading, separately: the row could be right and this wrong.
+	if want := "<h4>" + subject + "</h4>"; !strings.Contains(body, want) {
+		t.Errorf("the detail heading is not the subject; want %s", want)
+	}
+	// And the goal is not lost — it is the body under that heading, which is
+	// the whole point: one line to recognise it, five sentences to explain it.
+	if want := `<p class="goalbody">` + goal + `</p>`; !strings.Contains(body, want) {
+		t.Errorf("the detail pane does not carry the goal as the body; want %s", want)
+	}
+}
+
+func TestTheTaskRowDerivesAHeadlineForATaskWithNoSubject(t *testing.T) {
+	// Every task queued before this column existed.
+	s, st := newTestServer(t)
+	const goal = "Add a cached projection of the rack inventory query. " +
+		"It recomputes the whole join per request."
+	if _, err := st.CreateTask(context.Background(), store.Task{
+		Slug: "old", RepoPath: "/tmp/repo", Goal: goal,
+		State: "queued", MaxIterations: 10, BlockingSeverity: "any",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := get(t, s, "/?sel=1").Body.String()
+	want := `<span class="goal">Add a cached projection of the rack inventory query</span>`
+	if !strings.Contains(body, want) {
+		t.Errorf("a task with no subject is not listed under one line; want %s", want)
+	}
+	// Belt and braces on the same point: the second sentence must not be in the
+	// headline. Without the closing tag above, this test would pass unchanged
+	// against the old template, since the derived headline is a prefix of it.
+	if strings.Contains(body, `<span class="goal">`+goal) {
+		t.Error("the row headline is still the whole goal")
+	}
+}
+
+func TestBodyOfSuppressesAGoalThatIsOnlyItsHeadline(t *testing.T) {
+	cases := []struct{ name, text, headline, want string }{
+		// The commonest task there is: one sentence, typed by hand. The
+		// headline is those same words without the full stop, so there is
+		// nothing left for a body to add — and rendering the sentence twice,
+		// once as the heading and once under it, would look like a bug.
+		{"one sentence with a full stop", "Do the thing.", "Do the thing", ""},
+		{"one sentence without one", "Do the thing", "Do the thing", ""},
+		{"wrapped across lines", "Do the\n  thing.", "Do the thing", ""},
+		// A wordy goal keeps its body: the first sentence became the headline
+		// and the rest is the reason the body exists.
+		{"more than one sentence", "First bit. Second bit.", "First bit",
+			"First bit. Second bit."},
+		// A subject the model wrote in its own words, not a prefix of the goal.
+		{"a written subject", "Add a cached projection.", "Cache the join",
+			"Add a cached projection."},
+	}
+	for _, c := range cases {
+		if got := bodyOf(c.text, c.headline); got != c.want {
+			t.Errorf("%s: bodyOf(%q, %q) = %q, want %q",
+				c.name, c.text, c.headline, got, c.want)
+		}
+	}
+}
+
+func TestAShortGoalIsNotRenderedTwice(t *testing.T) {
+	// The same thing through the whole render, because the helper being right
+	// is only useful if the detail pane actually reads it.
+	s, st := newTestServer(t)
+	if _, err := st.CreateTask(context.Background(), store.Task{
+		Slug: "do-the-thing", RepoPath: "/tmp/repo", Goal: "Do the thing.",
+		State: "queued", MaxIterations: 10, BlockingSeverity: "any",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if body := get(t, s, "/?sel=1").Body.String(); strings.Contains(body, `class="goalbody"`) {
+		t.Error("a one-sentence goal should not render a body under its own heading")
+	}
+}
+
+func TestSearchMatchesTheSubject(t *testing.T) {
+	s, st := newTestServer(t)
+	if _, err := st.CreateTask(context.Background(), store.Task{
+		Slug: "cache", RepoPath: "/tmp/repo", Subject: "Cache the rack inventory query",
+		Goal:  "Something the search term does not appear in at all.",
+		State: "queued", MaxIterations: 10, BlockingSeverity: "any",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if body := get(t, s, "/?q=inventory").Body.String(); !strings.Contains(body, "Cache the rack") {
+		t.Error("searching should match a task's subject")
+	}
+}
+
+func TestPostTasksAcceptsASubject(t *testing.T) {
+	s, st := newTestServer(t)
+	rec := post(t, s, "/tasks", url.Values{
+		"repo":    {initRepo(t)},
+		"subject": {"Cache the inventory join"},
+		"goal":    {"Add a cached projection. It recomputes the whole join per request."},
+	})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", rec.Code, rec.Body.String())
+	}
+	tasks, err := st.ListTasks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].Subject != "Cache the inventory join" {
+		t.Fatalf("tasks = %+v, want the submitted subject", tasks)
+	}
+}

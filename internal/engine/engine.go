@@ -877,7 +877,7 @@ func (e *Engine) finish(ctx context.Context, task *store.Task) (*loop.Outcome, e
 	}
 	url, err := e.PR.Open(ctx, worktree.PRRequest{
 		Worktree:   wt,
-		Title:      worktree.PRTitle(task.Goal),
+		Title:      worktree.PRTitle(task.Headline()),
 		Body:       worktree.PRBody(task.Goal, string(plan), "No blocking findings remained."),
 		BaseBranch: base,
 	})

@@ -5,8 +5,14 @@
 # submitting a batch cannot change the behaviour of a run already going.
 tasks:
   - repo: /home/kal/code/dc-planner
+    # Optional. One line, and what the task is listed under on the board, in
+    # its branch name and in its pull request title. Left out, it is derived
+    # from the goal's first sentence.
+    subject: Add CSV export to the rack inventory
     goal: |
-      Add CSV export to the rack inventory view.
+      Add CSV export to the rack inventory view. Follow the existing
+      server-rendered pattern; the operator downloads the file rather than
+      seeing it in the page.
     constraints:
       - Server-rendered, no new JS dependencies
       - Follow the existing repo_*.go pattern in internal/store
@@ -21,6 +27,7 @@ tasks:
   - repo: /home/kal/code/dc-planner
     goal: Add a column picker to the rack inventory view.
     # Waits for the earlier task to reach done. The name is that task's slug,
-    # derived from its goal; a slug nothing matches fails the submit.
+    # derived from its subject when it has one, and from its goal — exactly as
+    # before — when it does not; a slug nothing matches fails the submit.
     depends_on:
-      - add-csv-export-to-the-rack-inventory-view
+      - add-csv-export-to-the-rack-inventory

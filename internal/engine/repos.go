@@ -205,6 +205,7 @@ func (e *Engine) PromoteBacklogItem(ctx context.Context, itemID int64) (store.Ta
 	constraints := backlogConstraints(item)
 	task, err := e.Submit(ctx, BatchTask{
 		Repo:        repo.Path,
+		Subject:     item.Headline(),
 		Goal:        item.Title,
 		Constraints: constraints,
 		// Severity and verify are left empty on purpose: Submit resolves them
@@ -309,6 +310,7 @@ func (e *Engine) recordBacklogProposals(ctx context.Context, p store.Proposal, r
 		item := store.BacklogItem{
 			RepoID:         p.RepoID,
 			Source:         store.BacklogAnalysis,
+			Subject:        r.Subject,
 			Title:          r.Goal,
 			Detail:         r.Rationale,
 			Evidence:       r.Evidence,

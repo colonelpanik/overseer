@@ -189,8 +189,10 @@ do not yet know what to ask for.
 Four steps. Give it a path already on this machine, or a URL to clone. Say what
 to look for — test coverage, tech debt, security, performance, documentation,
 correctness — plus anything else in free text and a cap on how many tasks to
-propose. Watch it read. Then review what came back: each proposal carries the
-goal, the constraints it inferred from your repository's own conventions, the
+propose. Watch it read. Then review what came back: each proposal carries a
+subject and the goal it summarises — the subject is the one line the task is
+listed under, the goal is the whole instruction and is allowed to take five
+sentences — the constraints it inferred from your repository's own conventions, the
 verify command it actually found, a blocking threshold, a cost cap, the
 dependencies between tasks, and — the part worth reading first — *why*, with
 the `file:line` references behind it. Edit any of it, deselect what you do not
@@ -398,7 +400,9 @@ tasks:
     depends_on: [enable-wal-mode-on-the-store-connection]
 ```
 
-The name is the other task's slug, which is derived from its goal. A dependency
+The name is the other task's slug, which is derived from its `subject` when it
+has one and from its goal when it does not — so every task file written before
+subjects existed names exactly the slugs it always did. A dependency
 may be a task earlier in the same batch or one already in the database; naming
 one that does not exist fails the submit rather than queueing a task that waits
 on nothing. Cycles and self-references are rejected on write.

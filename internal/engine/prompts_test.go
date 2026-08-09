@@ -82,3 +82,29 @@ func TestExecPromptPointsAtThePlan(t *testing.T) {
 		t.Error("ExecPrompt must restate the goal")
 	}
 }
+
+func TestAnalysisPromptAsksForASubjectAndSaysWhatMakesOne(t *testing.T) {
+	p := AnalysisPrompt(nil, "", "", 8)
+	for _, want := range []string{`"subject"`, "72 characters", `"goal"`} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the analysis prompt does not mention %q", want)
+		}
+	}
+	// The schema is embedded verbatim, so the field has to be in it too — the
+	// model reads that as the contract.
+	if !strings.Contains(p, `"subject": {`) {
+		t.Error("the embedded schema does not describe subject")
+	}
+}
+
+func TestArchitectAcceptPromptAsksForASubject(t *testing.T) {
+	// The architect's list reaches the same rows through the same parser, so a
+	// subject it does not know to write is a subject nothing else can supply.
+	p := ArchitectAcceptPrompt(true, 8)
+	if !strings.Contains(p, `"subject"`) {
+		t.Error("the accept prompt does not ask for a subject")
+	}
+	if !strings.Contains(p, "72 characters") {
+		t.Error("the accept prompt does not bound the subject")
+	}
+}
