@@ -548,10 +548,11 @@ quietly stayed put.
   modes, `danger-full-access` included, is built out of bubblewrap and would
   still nest. Neither is done with `sandbox: off`, where the agent's own
   sandbox is the only one there is. The board says which applies.
-- **The reviewer still cannot write.** That property now rests entirely on
-  bubblewrap: overseer mounts the reviewer's worktree read-only because
-  writability follows the *role*, not the CLI. Dropping codex's own
-  `-s read-only` removes a second statement of the same rule, not the rule.
+- **Under overseer's sandbox, the reviewer still cannot write.** The property
+  rests entirely on bubblewrap: overseer mounts the reviewer's worktree
+  read-only because writability follows the *role*, not the CLI. Dropping
+  codex's own `-s read-only` there removes a second statement of the same
+  rule, not the rule.
 - Network is **not** restricted — the agents call an HTTPS API. The sandbox
   limits what an agent can read and write, not what it can send. Do not point
   overseer at a repository whose contents you would not want an agent to
@@ -560,8 +561,10 @@ quietly stayed put.
   permission system rather than narrowing it, so with the sandbox off the agent
   has this user's full filesystem access. The board says so on every page when
   that is the case.
-- Codex additionally runs `-s read-only`, and its worktree mount is read-only.
-  The reviewer cannot write.
+- **Codex's own `-s read-only` is passed only when overseer is not confining
+  it** — `sandbox: off`, or `auto` on a host where bubblewrap turned out to be
+  unusable. Under bubblewrap the read-only worktree mount carries the rule
+  instead, and no `-s` is passed at all.
 - Nothing merges. Pull requests are always drafts.
 - Codex output that cannot be parsed into a verdict fails the task. It is
   never read as approval.
