@@ -190,6 +190,54 @@ func TestProposedTaskDefaultsAreUsable(t *testing.T) {
 	}
 }
 
+func TestParseActionsAcceptsAConversationThatDecidedNothing(t *testing.T) {
+	// A chat that has been asked to produce actions before anything was
+	// agreed has correctly produced none. That is a different outcome from
+	// an analysis returning nothing, which means the analysis failed.
+	got, err := ParseActions([]byte(`{"tasks":[]}`), 12)
+	if err != nil {
+		t.Fatalf("ParseActions: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("tasks = %d, want 0", len(got))
+	}
+}
+
+func TestParseActionsIsAsStrictAsParseProposalAboutEverythingElse(t *testing.T) {
+	// Moving the emptiness rule out of the shared validator must not have
+	// loosened any of the rules that stop money being spent on nonsense.
+	cases := map[string]string{
+		"not json":        `sure! here is the list`,
+		"missing tasks":   `{}`,
+		"unknown field":   `{"tasks":[],"summary":"hi"}`,
+		"trailing object": string(wrap(oneTask("k", ""))) + `{"tasks":[]}`,
+		"null tasks":      `{"tasks":null}`,
+		"forward dep": string(wrap(
+			`{"key":"a","goal":"g","constraints":[],"verify":null,`+
+				`"blocking_severity":"any","cost_cap":null,"depends_on":["b"],`+
+				`"rationale":"r","evidence":[]}`,
+			oneTask("b", ""))),
+		"duplicate key": string(wrap(oneTask("k", ""), oneTask("k", ""))),
+	}
+	for name, raw := range cases {
+		if _, err := ParseActions([]byte(raw), 12); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+func TestAnEmptyTaskListStillFailsAnAnalysisAndADesign(t *testing.T) {
+	// The rule moved out of ValidateProposedTasks and into these two callers;
+	// if it went missing on the way, an analysis that read nothing would
+	// present an empty review list as a success.
+	if _, err := ParseProposal([]byte(`{"tasks":[]}`), 12); err == nil {
+		t.Error("an analysis proposing nothing should be an error")
+	}
+	if _, _, err := ParseDesign([]byte(`{"design":"# Design","tasks":[]}`), 12); err == nil {
+		t.Error("a design with nothing to build should be an error")
+	}
+}
+
 func TestProposalSchemaIsEmbedded(t *testing.T) {
 	// The prompt pastes this in verbatim; an empty schema would silently
 	// become a prompt with no contract in it.
