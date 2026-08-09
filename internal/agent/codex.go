@@ -17,7 +17,33 @@ type CodexOpts struct {
 	// ExternallySandboxed says overseer is already confining this process, so
 	// codex must not build a sandbox of its own. See CodexArgs.
 	ExternallySandboxed bool
+
+	// BaseURL, KeyEnv and WireAPI describe a third-party endpoint. Empty
+	// BaseURL means the vendor's own, where codex's stored login is the
+	// credential and nothing here should override it.
+	//
+	// These exist because environment variables are not enough. A codex logged
+	// in with a ChatGPT account ignores OPENAI_BASE_URL and sends the request
+	// to OpenAI anyway — which then rejects the third-party model name, so the
+	// operator is told their model "is not supported when using Codex with a
+	// ChatGPT account" and never learns their gateway was not contacted. A
+	// named provider is what actually redirects it.
+	BaseURL string
+	// KeyEnv is the variable codex reads the credential from. Overseer sets it
+	// in the child's environment, so the name is overseer's to choose and the
+	// operator's own key_env — or an inline key — reaches codex either way.
+	KeyEnv string
+	// WireAPI is the protocol the endpoint speaks. Empty defaults to
+	// "responses": codex 0.147 refuses wire_api = "chat" outright.
+	WireAPI string
 }
+
+// codexProviderName is the provider entry overseer defines on the command line.
+//
+// Fixed rather than taken from the operator's provider name: only one is ever
+// active per invocation, a TOML key has a shape an arbitrary name need not
+// have, and a constant cannot carry anything into the -c arguments.
+const codexProviderName = "overseer"
 
 // CodexArgs builds the argv for a headless Codex invocation.
 //
@@ -57,6 +83,21 @@ func CodexArgs(o CodexOpts) []string {
 	}
 	if o.LastMessagePath != "" {
 		args = append(args, "--output-last-message", o.LastMessagePath)
+	}
+	if o.BaseURL != "" {
+		wire := o.WireAPI
+		if wire == "" {
+			wire = "responses"
+		}
+		n := codexProviderName
+		args = append(args,
+			"-c", `model_provider="`+n+`"`,
+			"-c", `model_providers.`+n+`.name="`+n+`"`,
+			"-c", `model_providers.`+n+`.base_url="`+o.BaseURL+`"`,
+			"-c", `model_providers.`+n+`.wire_api="`+wire+`"`)
+		if o.KeyEnv != "" {
+			args = append(args, "-c", `model_providers.`+n+`.env_key="`+o.KeyEnv+`"`)
+		}
 	}
 	if o.Model != "" {
 		args = append(args, "-m", o.Model)

@@ -124,6 +124,35 @@ func Default() Config {
 }
 
 // Load reads path over the top of Default. A missing file is not an error.
+// checkKeyFileMode refuses to read a credential out of a file others can read.
+//
+// This is the one respect in which holding a key here really does differ from
+// holding it in an environment file: the mode of this file is ours to check,
+// so it gets checked. Only when a key is actually present — every existing
+// config is 0644 and holds no secret, and refusing those would break every
+// install to protect nothing.
+func (c Config) checkKeyFileMode(path string) error {
+	holdsKey := false
+	for _, p := range c.Providers {
+		if p.Key != "" {
+			holdsKey = true
+			break
+		}
+	}
+	if !holdsKey {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat config: %w", err)
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		return fmt.Errorf("%s holds a provider key but is mode %04o, readable by others: chmod 600 %s",
+			path, mode, path)
+	}
+	return nil
+}
+
 func Load(path string) (Config, error) {
 	c := Default()
 	raw, err := os.ReadFile(path)
@@ -152,6 +181,9 @@ func Load(path string) (Config, error) {
 	c.applyLegacyAnalysisModel(stated)
 
 	if err := c.validate(); err != nil {
+		return c, err
+	}
+	if err := c.checkKeyFileMode(path); err != nil {
 		return c, err
 	}
 	return c, nil

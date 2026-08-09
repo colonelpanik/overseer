@@ -24,6 +24,11 @@ type resolved struct {
 	// whichever CLI it happens to run through, and the coder must be able to
 	// whichever CLI it happens to run through.
 	Writable bool
+	// BaseURL and WireAPI describe a third-party endpoint, empty for a vendor's
+	// own. codex needs them on its command line rather than in its environment
+	// — see agent.CodexOpts.
+	BaseURL string
+	WireAPI string
 	// Confined is whether overseer is sandboxing this invocation itself.
 	//
 	// Both CLIs sandbox their own shell tool with bubblewrap, and a nested user
@@ -89,17 +94,18 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 		return resolved{}, err
 	}
 
-	var key string
-	if provider.KeyEnv != "" {
-		key = os.Getenv(provider.KeyEnv)
-		// An empty key is only a problem when the provider is a custom
-		// endpoint. Against the vendor default the CLI may be logged in
-		// through its own stored credentials, which is the common case.
-		if key == "" && provider.BaseURL != "" {
-			return resolved{}, fmt.Errorf(
-				"role %q uses provider %q, whose key_env %s is not set in the daemon's environment",
-				name, role.Provider, provider.KeyEnv)
+	// From the config file or from the environment, whichever holds it.
+	key := provider.Credential()
+	// An empty credential is only a problem when the provider is a custom
+	// endpoint. Against the vendor default the CLI may be logged in through
+	// its own stored credentials, which is the common case.
+	if key == "" && provider.BaseURL != "" {
+		where := "set `key:` on the provider, or name the environment variable in `key_env:`"
+		if provider.KeyEnv != "" {
+			where = fmt.Sprintf("%s is not set in the daemon's environment", provider.KeyEnv)
 		}
+		return resolved{}, fmt.Errorf("role %q uses provider %q, which has no credential: %s",
+			name, role.Provider, where)
 	}
 
 	r := resolved{
@@ -107,6 +113,8 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 		Agent:    role.Agent,
 		Provider: role.Provider,
 		Model:    role.Model,
+		BaseURL:  provider.BaseURL,
+		WireAPI:  provider.WireAPI,
 		Env:      agent.ProviderEnv(role.Agent, provider.Kind, provider.BaseURL, key),
 		Writable: roleWrites[name],
 		Confined: e.confining(),
@@ -169,6 +177,11 @@ func (r resolved) args(prompt, resume, schemaPath, lastMessage string) []string 
 			LastMessagePath:     lastMessage,
 			Model:               r.Model,
 			ExternallySandboxed: r.Confined,
+			// A third-party endpoint reaches codex as a named provider on the
+			// command line, not as OPENAI_BASE_URL — see CodexOpts.
+			BaseURL: r.BaseURL,
+			KeyEnv:  agent.CodexKeyEnv,
+			WireAPI: r.WireAPI,
 		})
 	}
 	return agent.ClaudeArgs(agent.ClaudeOpts{
