@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -206,5 +207,73 @@ func TestBaseRefRoundTrips(t *testing.T) {
 	}
 	if got.BaseRef != "origin/main" {
 		t.Errorf("BaseRef = %q, want origin/main", got.BaseRef)
+	}
+}
+
+func TestOpeningADatabaseWrittenBeforeChatsAddsTheProposalLink(t *testing.T) {
+	// CREATE TABLE IF NOT EXISTS is a no-op against a table that already
+	// exists, so a column added after a release reaches an existing database
+	// only through addedColumns. Getting that wrong breaks every upgrade, and
+	// only for people who already use overseer.
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	// The proposals table as it stood before the chat existed.
+	_, err = old.Exec(`CREATE TABLE proposals (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_id INTEGER NOT NULL DEFAULT 0,
+		repo_path TEXT NOT NULL DEFAULT '',
+		source_url TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL,
+		focus TEXT NOT NULL DEFAULT '',
+		notes TEXT NOT NULL DEFAULT '',
+		max_tasks INTEGER NOT NULL DEFAULT 12,
+		model TEXT NOT NULL DEFAULT '',
+		detected TEXT NOT NULL DEFAULT '',
+		provider TEXT NOT NULL DEFAULT '',
+		kind TEXT NOT NULL DEFAULT 'analyse',
+		design TEXT NOT NULL DEFAULT '',
+		architect_session TEXT NOT NULL DEFAULT '',
+		cost_usd REAL NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		transcript_path TEXT NOT NULL DEFAULT '',
+		err_msg TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL)`)
+	if err != nil {
+		t.Fatalf("create old proposals: %v", err)
+	}
+	if _, err := old.Exec(
+		`INSERT INTO proposals (state, created_at, updated_at) VALUES ('ready', ?, ?)`,
+		time.Now().UTC().Format(rfc3339), time.Now().UTC().Format(rfc3339)); err != nil {
+		t.Fatalf("insert old proposal: %v", err)
+	}
+	old.Close()
+
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open an older database: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	ctx := context.Background()
+	// The pre-existing row still reads, with the new column at its default.
+	p, err := s.GetProposal(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetProposal: %v", err)
+	}
+	if p.ChatID != 0 {
+		t.Errorf("ChatID = %d, want 0", p.ChatID)
+	}
+	// And the chat tables, which are new rather than altered, are there.
+	repo, err := s.UpsertRepo(ctx, Repo{Path: "/src/widget"})
+	if err != nil {
+		t.Fatalf("UpsertRepo: %v", err)
+	}
+	if _, err := s.CreateChat(ctx, repo.ID); err != nil {
+		t.Errorf("CreateChat on an upgraded database: %v", err)
 	}
 }

@@ -263,3 +263,54 @@ func TestRepoSpendIncludesUnattributedWork(t *testing.T) {
 		t.Errorf("metered = %v, want 0", metered)
 	}
 }
+
+func TestRepoStatsFoldsChatSpendAndDoesNotCallPullsAnalyses(t *testing.T) {
+	// A chat is the surface most likely to spend real money without anyone
+	// noticing, so its turns have to reach the per-repo figure. But a pull is
+	// not an analysis: counting three pulls as three analyses would make the
+	// repo list claim work that was never done.
+	ctx := context.Background()
+	s := newTestStore(t)
+	repo := testRepo(t, s, "/src/widget")
+
+	chat, err := s.CreateChat(ctx, repo.ID)
+	if err != nil {
+		t.Fatalf("CreateChat: %v", err)
+	}
+	for _, turn := range []ChatTurn{
+		{ChatID: chat.ID, Speaker: SpeakerOperator, Body: "why?"},
+		{ChatID: chat.ID, Speaker: SpeakerAssistant, Body: "because", CostUSD: 0.4, Provider: "anthropic"},
+		{ChatID: chat.ID, Speaker: SpeakerAssistant, Body: "also", CostUSD: 0.1, Provider: "bring-your-own"},
+	} {
+		if _, err := s.AddChatTurn(ctx, turn); err != nil {
+			t.Fatalf("AddChatTurn: %v", err)
+		}
+	}
+	if _, err := s.CreateProposal(ctx, Proposal{
+		RepoID: repo.ID, RepoPath: repo.Path, Kind: ProposalChat,
+		State: ProposalReady, ChatID: chat.ID, CostUSD: 0.2, Provider: "anthropic",
+	}); err != nil {
+		t.Fatalf("CreateProposal: %v", err)
+	}
+
+	stats, err := s.RepoStats(ctx, map[string]bool{"bring-your-own": true})
+	if err != nil {
+		t.Fatalf("RepoStats: %v", err)
+	}
+	got := stats[repo.ID]
+	if got.Analyses != 0 {
+		t.Errorf("Analyses = %d, want 0: a pull is not an analysis", got.Analyses)
+	}
+	// 0.4 from the chat turn plus 0.2 from the pull it produced.
+	if got.Reported != 0.6000000000000001 && got.Reported != 0.6 {
+		t.Errorf("Reported = %v, want 0.6", got.Reported)
+	}
+	if got.Metered != 0.1 {
+		t.Errorf("Metered = %v, want 0.1", got.Metered)
+	}
+	// Two assistant turns plus the pull's own run. The operator's turn cost
+	// nothing and ran no agent, so it is not one.
+	if got.Turns != 3 {
+		t.Errorf("Turns = %d, want 3", got.Turns)
+	}
+}
