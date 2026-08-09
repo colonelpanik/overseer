@@ -12,12 +12,26 @@ import (
 	"overseer/internal/store"
 )
 
-// captureStdout runs fn with os.Stdout redirected and returns what it printed.
+// captureStdout runs fn with os.Stdout redirected and returns what it printed,
+// failing the test if fn itself failed.
 //
 // Safe for the volumes here — one repository and one or two backlog rows, far
 // inside a pipe's buffer. A command that printed more than 64KB before this
 // read would deadlock, so do not reach for it to test cmdLogs.
 func captureStdout(t *testing.T, fn func() error) string {
+	t.Helper()
+	out, err := captureOutput(t, fn)
+	if err != nil {
+		t.Fatalf("the command failed: %v", err)
+	}
+	return out
+}
+
+// captureOutput is captureStdout for a command that is expected to fail: it
+// hands back both what was printed and the error, so a test can assert that a
+// failing command still said the right things — and, more to the point, did not
+// say the wrong ones.
+func captureOutput(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -31,13 +45,10 @@ func captureStdout(t *testing.T, fn func() error) string {
 
 	out, readErr := io.ReadAll(r)
 	r.Close()
-	if runErr != nil {
-		t.Fatalf("the command failed: %v", runErr)
-	}
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	return string(out)
+	return string(out), runErr
 }
 
 // seedBacklog puts one item on one repository's backlog and closes the store,
