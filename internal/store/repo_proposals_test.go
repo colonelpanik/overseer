@@ -248,3 +248,39 @@ func TestProposalSpendTotalsEveryAnalysis(t *testing.T) {
 		t.Errorf("spend = %v, want about 0.66", got)
 	}
 }
+
+func TestProposalTaskSubjectRoundTripsAndCanBeEdited(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	p, err := st.CreateProposal(ctx, Proposal{RepoPath: "/tmp/repo", State: ProposalReady})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceProposalTasks(ctx, p.ID, []ProposalTask{{
+		Ord: 0, Key: "cache", Subject: "Cache the rack inventory query",
+		Goal: "Add a cached projection of the rack inventory query. It recomputes the whole join per request.",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ProposalTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Subject != "Cache the rack inventory query" {
+		t.Fatalf("rows = %+v, want the subject stored", rows)
+	}
+
+	// The review step lets an operator fix a subject the model got wrong.
+	row := rows[0]
+	row.Subject = "Cache the inventory join"
+	if err := st.SaveProposalTask(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetProposalTask(ctx, p.ID, row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "Cache the inventory join" {
+		t.Errorf("Subject = %q, want the edited subject", got.Subject)
+	}
+}

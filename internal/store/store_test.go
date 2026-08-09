@@ -208,3 +208,138 @@ func TestBaseRefRoundTrips(t *testing.T) {
 		t.Errorf("BaseRef = %q, want origin/main", got.BaseRef)
 	}
 }
+
+func TestSubjectRoundTripsThroughCreateAndGetTask(t *testing.T) {
+	st := newTestStore(t)
+	created, err := st.CreateTask(context.Background(), Task{
+		Slug: "cache-the-rack-inventory-query", RepoPath: "/tmp/repo",
+		Subject: "Cache the rack inventory query", Goal: wordyGoal,
+		State: "queued",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetTask(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want the subject it was created with", got.Subject)
+	}
+	if got.Goal != wordyGoal {
+		t.Errorf("Goal = %q, want the whole goal kept as the body", got.Goal)
+	}
+}
+
+func TestSaveTaskLeavesTheSubjectAlone(t *testing.T) {
+	// Subject follows goal, which SaveTask deliberately does not write: every
+	// caller holds a row read before the operator touched anything, so writing
+	// it here would revert an edit landing mid-step.
+	st := newTestStore(t)
+	created, err := st.CreateTask(context.Background(), Task{
+		Slug: "s", RepoPath: "/tmp/repo", Subject: "The real subject",
+		Goal: "The real goal.", State: "queued",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := created
+	stale.Subject = "a stale copy"
+	stale.Goal = "a stale goal"
+	if err := st.SaveTask(context.Background(), stale); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetTask(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "The real subject" {
+		t.Errorf("Subject = %q, want SaveTask to have left it alone", got.Subject)
+	}
+}
+
+func TestRestartTaskWritesTheSubject(t *testing.T) {
+	// RestartTask does write goal — "restart it, but this time..." is the
+	// usual reason to restart — so it has to write the subject with it, or the
+	// task would be listed under a title describing work it is no longer doing.
+	st := newTestStore(t)
+	created, err := st.CreateTask(context.Background(), Task{
+		Slug: "s", RepoPath: "/tmp/repo", Subject: "The old subject",
+		Goal: "The old goal.", State: "escalated",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := created
+	next.State = "queued"
+	next.Subject = "The new subject"
+	next.Goal = "The new goal."
+	if err := st.RestartTask(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetTask(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "The new subject" || got.Goal != "The new goal." {
+		t.Errorf("subject/goal = %q / %q, want both replaced", got.Subject, got.Goal)
+	}
+}
+
+func TestHeadlineFallsBackToTheGoal(t *testing.T) {
+	// Every row written before the column existed has an empty subject, and
+	// nothing backfills them: they derive one at read time instead.
+	old := Task{Goal: wordyGoal}
+	if got, want := old.Headline(), Subject(wordyGoal); got != want {
+		t.Errorf("Headline = %q, want %q", got, want)
+	}
+	with := Task{Subject: "Cache the rack inventory query", Goal: wordyGoal}
+	if got := with.Headline(); got != "Cache the rack inventory query" {
+		t.Errorf("Headline = %q, want the stored subject", got)
+	}
+	if got := (ProposalTask{Goal: wordyGoal}).Headline(); got != Subject(wordyGoal) {
+		t.Errorf("ProposalTask.Headline = %q, want a derived subject", got)
+	}
+}
+
+func TestTheSubjectColumnIsAddedToAnOlderDatabase(t *testing.T) {
+	// A database written by a build without the column. schema.sql's CREATE
+	// TABLE IF NOT EXISTS is a no-op against it, so migrate() is the only
+	// thing that can add the column — and if it does not, every read of the
+	// task table fails with "no such column".
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overseer.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"tasks", "proposal_tasks", "backlog"} {
+		if _, err := first.DB().Exec("ALTER TABLE " + table + " DROP COLUMN subject"); err != nil {
+			t.Fatalf("take the column back off %s: %v", table, err)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen a database missing the column: %v", err)
+	}
+	defer again.Close()
+	if _, err := again.CreateTask(context.Background(), Task{
+		Slug: "s", RepoPath: "/tmp/repo", Subject: "A subject", Goal: "A goal.",
+		State: "queued",
+	}); err != nil {
+		t.Fatalf("write a task after the migration: %v", err)
+	}
+
+	// The backlog's column, through the writer that would fail without it.
+	repo := testRepo(t, again, "/src/widget")
+	if _, err := again.AddBacklogItem(context.Background(), BacklogItem{
+		RepoID: repo.ID, Source: BacklogAnalysis,
+		Subject: "A subject", Title: "A title.",
+	}); err != nil {
+		t.Fatalf("write a backlog item after the migration: %v", err)
+	}
+}

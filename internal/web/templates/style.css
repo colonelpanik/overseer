@@ -310,6 +310,7 @@ a:hover > .check { border-color: var(--color-accent); }
 .detail-head { flex: none; padding: 14px 20px 12px; border-bottom: 2px solid var(--color-divider); }
 .detail-head .meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 8px; }
 .detail-head h4 { margin: 0 0 6px; max-width: 80ch; text-wrap: pretty; }
+.detail-head .goalbody { margin: 0 0 8px; max-width: 92ch; font-size: 13px; color: color-mix(in srgb, var(--color-text) 70%, transparent); text-wrap: pretty; }
 .detail-head .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -557,6 +558,7 @@ pre.term {
 .proposed .pickbtn:hover .check { border-color: var(--color-accent); }
 .proposed-body { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .proposed .goal { font-size: 13.5px; text-wrap: pretty; }
+.proposed .taskbody { font-size: 12.5px; color: color-mix(in srgb, var(--color-text) 70%, transparent); text-wrap: pretty; }
 .proposed .why { font-size: 12px; color: color-mix(in srgb, var(--color-text) 65%, transparent); text-wrap: pretty; }
 .proposed .edit { margin-top: 4px; }
 .proposed .edit > summary { cursor: pointer; width: max-content; }

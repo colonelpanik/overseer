@@ -133,6 +133,13 @@ writes. Do not try.
 
 Each task must be:
 
+- Two things, not one: a "subject" and a "goal". The goal is the full
+  instruction and should be exactly as long as it needs to be — several
+  sentences is normal and better than a vague one. The subject is the one line
+  the task is listed under: at most 72 characters, imperative, no trailing full
+  stop, and recognisable on its own without the goal beside it. "Cache the rack
+  inventory query", not "Performance work" and not the goal's first 72
+  characters.
 - ONE self-contained change an agent can finish and a reviewer can judge. Not a
   theme, not an area of the codebase, not "audit X". If you cannot describe the
   diff you expect, it is not a task.
@@ -276,6 +283,13 @@ every task is judged against it. Do not include a task list in it.
 `)
 	fmt.Fprintf(&b, `"tasks" is at most %d items. Each one must be:
 
+- Two things, not one: a "subject" and a "goal". The goal is the full
+  instruction and should be exactly as long as it needs to be — several
+  sentences is normal and better than a vague one. The subject is the one line
+  the task is listed under: at most 72 characters, imperative, no trailing full
+  stop, and recognisable on its own without the goal beside it. "Cache the rack
+  inventory query", not "Performance work" and not the goal's first 72
+  characters.
 - ONE self-contained change an agent can finish and a reviewer can judge. Not a
   theme, not "the storage layer". If you cannot describe the diff you expect,
   it is not a task.

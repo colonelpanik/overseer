@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"overseer/internal/store"
 )
 
 // handleAnalyse opens a wizard against a local path or a URL to clone.
@@ -121,6 +123,10 @@ func (s *Server) handleAnalyseTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row.Goal = goal
+		// Normalised the same way the engine normalises a model's, so an
+		// operator who pastes a paragraph in here does not get a paragraph
+		// back on the board.
+		row.Subject = store.NormalizeSubject(r.FormValue("subject"))
 		row.Verify = strings.TrimSpace(r.FormValue("verify"))
 		if sev := strings.TrimSpace(r.FormValue("severity")); sev != "" {
 			row.Severity = sev

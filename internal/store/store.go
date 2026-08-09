@@ -78,6 +78,10 @@ var addedColumns = []struct{ table, column, decl string }{
 	{"proposals", "kind", "TEXT NOT NULL DEFAULT 'analyse'"},
 	{"proposals", "design", "TEXT NOT NULL DEFAULT ''"},
 	{"proposals", "architect_session", "TEXT NOT NULL DEFAULT ''"},
+	// The short form of a task, beside the goal it summarises.
+	{"tasks", "subject", "TEXT NOT NULL DEFAULT ''"},
+	{"proposal_tasks", "subject", "TEXT NOT NULL DEFAULT ''"},
+	{"backlog", "subject", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrate brings an existing database up to the current schema. It is

@@ -63,8 +63,12 @@ type ReposView struct {
 
 // BacklogRow is one item on a repository's todo list.
 type BacklogRow struct {
-	ID       int64
-	Title    string
+	ID    int64
+	Title string
+	// Title is the one line the item is listed under and Body is its full text
+	// when that is longer — an analysis's proposal is a paragraph, and the
+	// list has to be scannable before it is readable.
+	Body     string
 	Detail   string
 	Evidence []string
 	Severity string
@@ -409,7 +413,8 @@ func (s *Server) buildBacklog(ctx context.Context, q Query) (*BacklogView, error
 func backlogRow(item store.BacklogItem) BacklogRow {
 	row := BacklogRow{
 		ID:       item.ID,
-		Title:    item.Title,
+		Title:    item.Headline(),
+		Body:     bodyOf(item.Title, item.Headline()),
 		Detail:   item.Detail,
 		Evidence: item.Evidence,
 		Severity: item.Severity,

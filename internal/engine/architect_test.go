@@ -405,3 +405,60 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id
 		t.Errorf("ErrMsg = %q, want it to say the scaffold produced nothing", got.ErrMsg)
 	}
 }
+
+// designReply with a subject on the first task and none on the second, so one
+// accept covers both the supplied and the derived path.
+const subjectDesignReply = `{"design":"# S3 sync\n\nOne binary. Resumable.","tasks":[` +
+	`{"key":"scaffold","subject":"Scaffold the module",` +
+	`"goal":"Scaffold the module and the CLI entry point. Everything else assumes it is there, so it comes first.",` +
+	`"constraints":[],"verify":"go test ./...","blocking_severity":"any","cost_cap":0,` +
+	`"depends_on":[],"rationale":"Everything else assumes it","evidence":[]},` +
+	`{"key":"walk","goal":"Walk a local tree and emit its files.","constraints":[],` +
+	`"verify":"go test ./...","blocking_severity":"any","cost_cap":0,` +
+	`"depends_on":["scaffold"],"rationale":"The source side","evidence":[]}]}`
+
+func TestAcceptCarriesTheArchitectsSubjectOntoTheRowsAndTheTask(t *testing.T) {
+	h := newHarness(t, fakeArchitect(t, subjectDesignReply), "true")
+	ctx := context.Background()
+
+	// An existing repository, so this is a redesign: it reaches ready without
+	// scaffolding, and its tasks can be queued straight away.
+	p, err := h.eng.StartDesign(ctx, h.repo, "make the storage layer resumable", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurns(t, h, p.ID, 2)
+	if err := h.eng.Accept(ctx, p.ID); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if got := waitForProposal(t, h, p.ID, store.ProposalReady, store.ProposalFailed); got.State != store.ProposalReady {
+		t.Fatalf("State = %q (%s), want ready", got.State, got.ErrMsg)
+	}
+
+	rows, err := h.st.ProposalTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	if rows[0].Subject != "Scaffold the module" {
+		t.Errorf("Subject = %q, want the architect's subject", rows[0].Subject)
+	}
+	// The second task was given no subject: it derives one, exactly as the
+	// analysis path does.
+	if rows[1].Subject != "Walk a local tree and emit its files" {
+		t.Errorf("derived Subject = %q, want the goal's first sentence", rows[1].Subject)
+	}
+
+	created, err := h.eng.QueueProposal(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created[0].Subject != "Scaffold the module" {
+		t.Errorf("task Subject = %q, want the architect's subject", created[0].Subject)
+	}
+	if created[0].Slug != "scaffold-the-module" {
+		t.Errorf("task Slug = %q, want the subject's slug", created[0].Slug)
+	}
+}

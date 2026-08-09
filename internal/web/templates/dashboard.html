@@ -168,14 +168,14 @@
                a thing the HTML parser will keep. */}}
           <div class="taskrow tone-{{.Tone}}{{if .Selected}} selected{{end}}">
             <span class="rail"></span>
-            <a class="body" href="{{.URL}}">
+            <a class="body" href="{{.URL}}"{{if .Body}} title="{{.Body}}"{{end}}>
               <span class="line">
                 <span class="dot"></span>
                 <span class="label state">{{.State}}</span>
                 <span class="small">{{.Progress}}</span>
                 <span class="spacer"></span>
               </span>
-              <span class="goal">{{.Goal}}</span>
+              <span class="goal">{{.Subject}}</span>
               <span class="foot">
                 <span class="small repo">{{.Repo}}</span>
                 <span class="spacer"></span>
@@ -190,7 +190,7 @@
             </a>
             {{if .Bulkable}}
             <a class="pick" href="{{.BulkURL}}" title="select for a bulk action"
-               aria-label="Select {{.Goal}} for a bulk action">
+               aria-label="Select {{.Subject}} for a bulk action">
               <span class="check{{if .Checked}} on{{end}}"></span>
             </a>
             {{end}}
@@ -236,7 +236,8 @@
             {{end}}
           </div>
         </div>
-        <h4>{{.Goal}}</h4>
+        <h4>{{.Subject}}</h4>
+        {{if .Body}}<p class="goalbody">{{.Body}}</p>{{end}}
         <div class="chips">
           {{range .Chips}}<span class="tag tag-{{.Kind}}">{{.Label}}</span>{{end}}
         </div>
@@ -767,7 +768,8 @@
           </form>
           {{end}}
           <div class="proposed-body">
-            <div class="goal">{{$row.Goal}}</div>
+            <div class="goal">{{$row.Subject}}</div>
+            {{if $row.Body}}<div class="taskbody">{{$row.Body}}</div>{{end}}
             <div class="small">{{$row.Meta}}</div>
             {{if $row.Rationale}}<div class="why">{{$row.Rationale}}</div>{{end}}
             {{if $row.Evidence}}
@@ -783,6 +785,8 @@
               <summary class="small">edit</summary>
               <form method="post" action="/analyse/{{$wid}}/task/{{$row.ID}}">
                 <input type="hidden" name="action" value="save">
+                <div class="field"><label>Subject</label>
+                  <input class="input" name="subject" value="{{$row.Subject}}"></div>
                 <div class="field"><label>Goal</label>
                   <textarea class="input" name="goal" style="min-height:52px">{{$row.Goal}}</textarea></div>
                 <div class="pair">
@@ -1067,6 +1071,7 @@
             <span class="small">{{.When}}</span>
           </span>
           <span class="goal">{{.Title}}</span>
+          {{if .Body}}<span class="small">{{.Body}}</span>{{end}}
           {{if .Detail}}<span class="small">{{.Detail}}</span>{{end}}
           <span class="metaline">
             {{if .Origin}}<span class="small">{{.Origin}}</span>{{end}}
@@ -1224,6 +1229,11 @@
     </div>
     {{with .Add}}
     <div class="body">
+      <div class="field">
+        <label for="subject">Subject <span class="small">optional — one line, derived from the goal if you leave it</span></label>
+        <input class="input" id="subject" name="subject"
+               placeholder="Cache the rack inventory query">
+      </div>
       <div class="field">
         <label for="goal">Goal</label>
         <textarea class="input" id="goal" name="goal" required style="min-height:76px"

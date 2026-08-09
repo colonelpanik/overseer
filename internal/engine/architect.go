@@ -212,8 +212,10 @@ func (e *Engine) accept(ctx context.Context, proposalID int64) {
 	rows := make([]store.ProposalTask, 0, len(tasks))
 	for i, t := range tasks {
 		rows = append(rows, store.ProposalTask{
-			Ord:         i,
-			Key:         strings.TrimSpace(t.KeyOrEmpty()),
+			Ord: i,
+			Key: strings.TrimSpace(t.KeyOrEmpty()),
+			// The architect's subject, or one derived from the goal.
+			Subject:     store.SubjectOr(t.SubjectOrEmpty(), t.GoalOrEmpty()),
 			Goal:        strings.TrimSpace(t.GoalOrEmpty()),
 			Constraints: t.Constraints,
 			Verify:      strings.TrimSpace(t.VerifyOrEmpty()),
