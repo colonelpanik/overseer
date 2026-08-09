@@ -30,10 +30,16 @@ const (
 	// analyse because it wants a different model — analyse defaults to a cheap
 	// one for reading, and this decides everything downstream.
 	RoleArchitect = "architect"
+	// RoleChat answers questions about a repository. Separate from architect
+	// for the same reason architect is separate from analyse: this one is used
+	// casually and often, and sharing a role would mean the only way to make
+	// "what does this do?" cheaper is to make the design conversation cheaper
+	// too.
+	RoleChat = "chat"
 )
 
 // RoleNames is every role, in the order the dashboard shows them.
-var RoleNames = []string{RoleCode, RoleReview, RoleAnalyse, RoleArchitect}
+var RoleNames = []string{RoleCode, RoleReview, RoleAnalyse, RoleArchitect, RoleChat}
 
 // RoleDescriptions explains what each role does, for the settings pane.
 var RoleDescriptions = map[string]string{
@@ -41,6 +47,7 @@ var RoleDescriptions = map[string]string{
 	RoleReview:    "reviews the plan and the diff, and produces the verdict",
 	RoleAnalyse:   "reads a repository and proposes a task list",
 	RoleArchitect: "talks a design through with you, then proposes the tasks",
+	RoleChat:      "answers questions about a repository, and turns the answers into work",
 }
 
 // Provider is an endpoint overseer can point an agent CLI at.
@@ -115,6 +122,11 @@ func defaultRoles() map[string]Role {
 		// The strongest model by default: this conversation decides what
 		// everything else builds.
 		RoleArchitect: {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
+		// A middling model rather than the strongest: this one answers a
+		// question at a time, many times a day, and it reads rather than
+		// decides. Note it is absent from roleWrites, like the architect — a
+		// conversation about a repository must never be able to edit it.
+		RoleChat: {Agent: AgentClaude, Provider: "anthropic", Model: "claude-sonnet-5"},
 	}
 }
 

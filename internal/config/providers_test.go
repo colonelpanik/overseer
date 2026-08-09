@@ -208,6 +208,7 @@ blocking_severity: major
 			RoleReview:    {Agent: AgentCodex, Provider: "openai"},
 			RoleAnalyse:   {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
 			RoleArchitect: {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
+			RoleChat:      {Agent: AgentClaude, Provider: "anthropic", Model: "claude-opus-5"},
 		})
 	if err != nil {
 		t.Fatalf("SaveProvidersAndRoles: %v", err)
@@ -334,5 +335,58 @@ roles:
 	}
 	if c.Roles[RoleCode].Provider != "anthropic" {
 		t.Errorf("the file's own roles were lost: %+v", c.Roles)
+	}
+}
+
+func TestTheChatIsItsOwnRoleOnACheaperModel(t *testing.T) {
+	// The chat is used casually and often. Sharing the architect's role would
+	// put every "what does this do?" on the strongest model, and the only way
+	// to lower it would also lower the one conversation that wants opus.
+	c := Default()
+	role, ok := c.Roles[RoleChat]
+	if !ok {
+		t.Fatal("the chat has no default role")
+	}
+	if role.Model != "claude-sonnet-5" {
+		t.Errorf("chat model = %q, want claude-sonnet-5", role.Model)
+	}
+	if role.Agent != AgentClaude {
+		t.Errorf("chat agent = %q, want %q", role.Agent, AgentClaude)
+	}
+	if !contains(RoleNames, RoleChat) {
+		t.Error("the chat is missing from RoleNames, so the settings pane will not show it")
+	}
+	if RoleDescriptions[RoleChat] == "" {
+		t.Error("the chat has no description for the settings pane")
+	}
+	if err := c.validateProviders(); err != nil {
+		t.Errorf("the defaults must validate: %v", err)
+	}
+}
+
+func TestAConfigFileNamingOnlyTheOlderRolesStillLoads(t *testing.T) {
+	// Every existing config file predates this role. Load unmarshals over
+	// Default(), so the map is merged rather than replaced — but that is the
+	// property the upgrade depends on, so it is worth pinning.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+roles:
+  code:
+    agent: claude
+    provider: anthropic
+  review:
+    agent: codex
+    provider: openai
+`), 0o644)
+	if err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Roles[RoleChat].Agent == "" {
+		t.Error("a config file that predates the chat role should still get its default")
 	}
 }
