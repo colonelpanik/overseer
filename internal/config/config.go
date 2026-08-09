@@ -224,3 +224,9 @@ func (c Config) ProposalsDir() string { return filepath.Join(c.DataDir, "proposa
 
 // ImportsDir is where a repository cloned from a URL lands.
 func (c Config) ImportsDir() string { return filepath.Join(c.DataDir, "imported") }
+
+// ChatsDir is where a repository chat writes its transcript and the per-run
+// agent state that stands in for the agent's real one. One directory per
+// conversation, kept apart from ProposalsDir because a chat outlives every
+// proposal it produces.
+func (c Config) ChatsDir() string { return filepath.Join(c.DataDir, "chats") }
