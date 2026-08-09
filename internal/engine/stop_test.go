@@ -44,23 +44,6 @@ func waitForAgentEdit(t *testing.T, h *harness, id int64, name string) {
 	})
 }
 
-// waitForChatAgentEdit blocks until a chat or design agent has written into the
-// repository, which for those turns is the agent's working directory.
-//
-// The same proof waitForAgentEdit gives for a task, and needed for the same
-// reason. Ask records the operator's turn synchronously and only then detaches
-// the reply, so waiting for that turn says nothing about whether the agent is
-// running: it is satisfied before the process has started. A test that returned
-// on it would leave blockingClaude writing into a t.TempDir that cleanup is
-// already deleting, and fail in RemoveAll with "directory not empty".
-func waitForChatAgentEdit(t *testing.T, h *harness, name string) {
-	t.Helper()
-	waitFor(t, "the chat agent to write "+name, func() bool {
-		_, err := os.Stat(filepath.Join(h.repo, name))
-		return err == nil
-	})
-}
-
 // waitFor polls until cond holds, so a test never depends on a fixed sleep.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()

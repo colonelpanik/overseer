@@ -102,7 +102,7 @@ func TestAskRefusesWhileAReplyIsInFlight(t *testing.T) {
 	if err := h.eng.Ask(ctx, chat.ID, "first"); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	waitForChatAgentEdit(t, h, "partial.go")
+	waitForChatTurns(t, h, chat.ID, 1)
 	if err := h.eng.Ask(ctx, chat.ID, "second"); err == nil {
 		t.Error("a second question should be refused while the first is unanswered")
 	}
@@ -463,7 +463,7 @@ func TestPullRefusesWhileAReplyIsStillComing(t *testing.T) {
 	if err := h.eng.Ask(ctx, chat.ID, "what about X?"); err != nil {
 		t.Fatal(err)
 	}
-	waitForChatAgentEdit(t, h, "partial.go")
+	waitForChatTurns(t, h, chat.ID, 1)
 	if _, err := h.eng.PullActions(ctx, chat.ID); err == nil {
 		t.Error("a pull should be refused while a reply is in flight")
 	}
