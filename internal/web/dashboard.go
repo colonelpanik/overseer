@@ -187,6 +187,15 @@ func (s *Server) build(ctx context.Context, q Query) (*Dashboard, error) {
 			return nil, err
 		}
 	}
+	// Only when its overlay is open. A conversation is durable and unbounded,
+	// and this page reloads on every state event — reading a transcript that
+	// may be months long several times a minute, for an operator who is looking
+	// at the board, is the kind of cost that never shows up as a bug.
+	if q.Overlay == "chat" {
+		if d.Chat, err = s.buildChat(ctx, q); err != nil {
+			return nil, err
+		}
+	}
 	// The chip is on the nav whatever overlay is open: a repository filter you
 	// cannot see is a board that looks empty for no stated reason.
 	d.RepoChip = repoChip(repoByID, q)

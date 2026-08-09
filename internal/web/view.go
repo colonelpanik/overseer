@@ -390,6 +390,14 @@ type WizardView struct {
 	Waiting *WizardWaiting
 	Live    *LivePane
 
+	// EmptyNote is what a review step with no rows says. An analysis that found
+	// nothing and a conversation that has not agreed anything yet are different
+	// problems with different next moves.
+	EmptyNote string
+	// BackURL returns to where the proposal came from. Set only for a pull,
+	// whose way out is the conversation rather than the board.
+	BackURL string
+
 	Rows     []ProposedRow
 	Selected int
 	// AlreadyQueued is how many of these rows became tasks on an earlier
@@ -417,7 +425,10 @@ type WizardView struct {
 
 // DesignPane is the architect conversation.
 type DesignPane struct {
-	Turns []DesignTurn
+	Turns []ConvoTurn
+	// Who labels the other side's turns. The chat overlay renders through the
+	// same template block, so the label has to come from the data.
+	Who string
 	// Busy is true while a reply is in flight — the operator's turn was the
 	// last thing said. The reply box stays open anyway, because thinking of
 	// the next thing while it answers is the normal way to use this.
@@ -432,8 +443,11 @@ type DesignPane struct {
 	Accepted bool
 }
 
-// DesignTurn is one thing said.
-type DesignTurn struct {
+// ConvoTurn is one thing said, in either conversation.
+//
+// Shared by the design pane and the chat overlay so the two cannot drift
+// apart visually: they are the same interaction and should read the same.
+type ConvoTurn struct {
 	Speaker string
 	Body    string
 	When    string
@@ -513,6 +527,10 @@ type Dashboard struct {
 	Backlog     *BacklogView
 	RepoChip    *RepoChip
 	OpenBacklog int
+
+	// Chat is the per-repository conversation, assembled only when its overlay
+	// is open — it is unbounded, and the page reloads on every state event.
+	Chat *ChatView
 }
 
 // RunningAnalysis is the nav chip pointing at an in-flight or unreviewed
@@ -569,6 +587,13 @@ func buildWizard(p store.Proposal, rows []store.ProposalTask, live *LivePane, q 
 	}
 
 	w.Kind = p.Kind
+	w.EmptyNote = "The analysis produced nothing to review."
+	if p.Kind == store.ProposalChat {
+		w.EmptyNote = "That pull found nothing new to do. Keep talking and pull again once you have decided something."
+		// Closing the wizard on a pull should land back in the conversation,
+		// not on the bare board: the operator was mid-thought.
+		w.BackURL = q.URL("wizard", 0, "overlay", "chat", "repo", p.RepoID)
+	}
 	switch p.State {
 	case store.ProposalDesigning:
 		w.Step = StepDesign
@@ -595,12 +620,26 @@ func buildWizard(p store.Proposal, rows []store.ProposalTask, live *LivePane, q 
 			Title: "Reading the repository",
 			Body:  "The analysis has the repository mounted read-only. It cannot edit, commit or run anything that writes.",
 		}
+		if p.Kind == store.ProposalChat {
+			w.Waiting = &WizardWaiting{
+				Title: "Pulling the actions out",
+				Body: "Re-reading the conversation as it stood when you pressed the button, and turning " +
+					"what you agreed into a task list. The repository is mounted read-only, and the " +
+					"conversation is still open — this does not end it.",
+			}
+		}
 	case store.ProposalFailed:
 		// Failure lands on whichever step could act on it: a clone that never
 		// produced a repository has nothing to review.
 		w.Step = StepFocus
 		if p.RepoPath == "" {
 			w.Step = StepSource
+		}
+		// A pull has no focus step to go back to, and the focus form starts a
+		// full repository analysis — different work at a different cost. The
+		// way to try again is to pull again from the conversation.
+		if p.Kind == store.ProposalChat {
+			w.Step = StepReview
 		}
 	default:
 		w.Step = StepReview

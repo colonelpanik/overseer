@@ -105,7 +105,7 @@ func ParseQuery(r *http.Request) Query {
 		}
 	}
 	switch q.Overlay {
-	case "cli", "add", "settings", "analyses", "repos", "backlog":
+	case "cli", "add", "settings", "analyses", "repos", "backlog", "chat":
 	default:
 		q.Overlay = ""
 	}
