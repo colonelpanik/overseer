@@ -251,9 +251,17 @@ func TestStartResumesTheActionTheStateNames(t *testing.T) {
 // failure might not even land.
 func TestAStopDuringTheRetryBackoffParksRatherThanFails(t *testing.T) {
 	// An agent that reports a retryable error, so the engine enters its backoff.
+	//
+	// The reason goes in stop_reason, because that is the field the message is
+	// built from: ParseClaudeLine renders a failed result as "claude result
+	// <subtype> (stop_reason <stop_reason>)" and reads nothing else. Reporting
+	// it in an "error" object instead — as this fixture used to — left ErrMsg
+	// as "claude result error (stop_reason )", which IsRetryable rejects, so
+	// the task failed permanently on the first attempt and there was no
+	// backoff for the stop to land in.
 	flaky := writeScript(t, "claude", `
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
-echo '{"type":"result","subtype":"error","is_error":true,"error":{"message":"connection timeout"},"session_id":"s1"}'
+echo '{"type":"result","subtype":"error","is_error":true,"stop_reason":"connection timeout","session_id":"s1"}'
 exit 1
 `)
 	h := newHarness(t, flaky, fakeCodex(t, `{"verdict":"approved","findings":[]}`))
