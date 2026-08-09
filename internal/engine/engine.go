@@ -74,7 +74,34 @@ type Engine struct {
 	// them on every agent invocation.
 	providers map[string]config.Provider
 	roles     map[string]config.Role
+
+	// detached counts the background turns — an architect reply, an analysis,
+	// a clone, a scaffold — that outlive the request that started them. They
+	// are deliberately not cancelled when that request ends, so without this
+	// nothing can tell whether one is still writing under DataDir.
+	detached sync.WaitGroup
 }
+
+// background runs fn as one of the detached turns Wait blocks on.
+//
+// Every caller here starts work that outlives its request on purpose, so the
+// goroutine cannot be tied to the request context. Counting them is what makes
+// the difference between "detached" and "untrackable".
+func (e *Engine) background(fn func()) {
+	e.detached.Add(1)
+	go func() {
+		defer e.detached.Done()
+		fn()
+	}()
+}
+
+// Wait blocks until every detached turn has finished.
+//
+// A shutdown wants this so a half-written transcript is not left behind, and a
+// test wants it because its temporary DataDir is deleted the moment the test
+// returns — a turn still creating proposals/<id>/ underneath that deletion is
+// a race the test loses.
+func (e *Engine) Wait() { e.detached.Wait() }
 
 // New builds an Engine and materialises the verdict schema on disk.
 func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.PROpener) (*Engine, error) {

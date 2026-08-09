@@ -33,7 +33,8 @@ func (e *Engine) StartDesign(ctx context.Context, repoRef, brief string, newProj
 	}
 	// The error is dropped on purpose: there is nobody here to hand it to, and
 	// the recorded turn is what the dashboard reads.
-	go e.architectTurn(context.WithoutCancel(ctx), created.ID, "")
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.architectTurn(bg, created.ID, "") })
 	return created, nil
 }
 
@@ -142,7 +143,8 @@ func (e *Engine) Say(ctx context.Context, proposalID int64, message string) erro
 
 	// The error is dropped on purpose, as in StartDesign: the recorded turn is
 	// what the dashboard reads.
-	go e.architectTurn(context.WithoutCancel(ctx), proposalID, message)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.architectTurn(bg, proposalID, message) })
 	return nil
 }
 
@@ -245,7 +247,8 @@ func (e *Engine) Accept(ctx context.Context, proposalID int64) error {
 	}
 	e.notifyProposal()
 
-	go e.accept(context.WithoutCancel(ctx), proposalID)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.accept(bg, proposalID) })
 	return nil
 }
 
@@ -308,7 +311,8 @@ func (e *Engine) accept(ctx context.Context, proposalID int64) {
 	e.notifyProposal()
 
 	if p.Kind == store.ProposalCreate {
-		go e.scaffold(context.WithoutCancel(ctx), p.ID)
+		bg := context.WithoutCancel(ctx)
+		e.background(func() { e.scaffold(bg, p.ID) })
 	}
 }
 

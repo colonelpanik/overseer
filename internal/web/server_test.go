@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,13 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
+	// config.Default names the agents by bare binary, which PATH resolves to
+	// the operator's own Claude and Codex. A handler that starts a background
+	// turn would then run a real agent — slow, billable, and dependent on
+	// whatever is installed. These stubs exit immediately instead, so the turn
+	// fails fast and the handler under test is still the thing being tested.
+	cfg.ClaudeBin = stubAgent(t, "claude")
+	cfg.CodexBin = stubAgent(t, "codex")
 
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
@@ -32,7 +40,24 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Registered after DataDir's cleanup and so running before it: a design or
+	// an analysis outlives the request that started it, and a turn still
+	// writing under proposals/<id>/ while the temporary DataDir is being
+	// deleted is a race the deletion loses.
+	t.Cleanup(eng.Wait)
+
 	return New(cfg, st, eng, filepath.Join(cfg.DataDir, "config.yaml")), st
+}
+
+// stubAgent is an agent binary that does nothing and succeeds, for the tests
+// whose handler starts a turn they do not care about the content of.
+func stubAgent(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
