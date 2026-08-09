@@ -43,6 +43,7 @@ type RepoRow struct {
 
 	BoardURL   string
 	BacklogURL string
+	ChatURL    string
 	Analysing  bool
 }
 
@@ -174,6 +175,7 @@ func (s *Server) buildRepos(ctx context.Context, q Query) (*ReposView, error) {
 			Analysing:  analysing[r.ID],
 			BoardURL:   q.URL("repo", r.ID, "overlay", ""),
 			BacklogURL: q.URL("repo", r.ID, "overlay", "backlog"),
+			ChatURL:    q.URL("repo", r.ID, "overlay", "chat"),
 		}
 		v.Rows = append(v.Rows, row)
 	}

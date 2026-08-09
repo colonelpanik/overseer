@@ -459,7 +459,7 @@ func TestEveryTemplateClassIsStyled(t *testing.T) {
 		defined[m[1]] = true
 	}
 	// Classes carried for behaviour rather than appearance.
-	for _, name := range []string{"inline", "app"} {
+	for _, name := range []string{"inline", "app", "holds-typing"} {
 		defined[name] = true
 	}
 

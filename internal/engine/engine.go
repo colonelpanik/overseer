@@ -198,6 +198,23 @@ func (e *Engine) Recover(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "overseer: marked %d stranded analysis/analyses from a previous run\n", m)
 	}
 
+	// Both conversations strand the same way. A turn is a goroutine, not a
+	// claimable task, and busy is derived from the operator having spoken last
+	// — so nothing would ever clear it and the surface would say "thinking…"
+	// for ever. Answering with the reason is both the fix and the explanation.
+	reason := "the daemon restarted while this reply was running"
+	c, err := e.Store.FailStrandedChatTurns(ctx, reason)
+	if err != nil {
+		return err
+	}
+	d, err := e.Store.FailStrandedArchitectTurns(ctx, reason)
+	if err != nil {
+		return err
+	}
+	if c+d > 0 {
+		fmt.Fprintf(os.Stderr, "overseer: answered %d conversation(s) left waiting by a previous run\n", c+d)
+	}
+
 	// A global stop is a decision, not a condition, so it survives the restart.
 	// Individual stops need nothing here: they are a column on the task, and
 	// the claim query already reads it.

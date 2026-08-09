@@ -57,6 +57,9 @@ func (s *Store) RepoStats(ctx context.Context, metered map[string]bool) (map[int
 	if err := s.foldProposalUsage(ctx, out, metered); err != nil {
 		return nil, err
 	}
+	if err := s.foldChatUsage(ctx, out, metered); err != nil {
+		return nil, err
+	}
 
 	counts, err := s.OpenBacklogCounts(ctx)
 	if err != nil {
@@ -129,7 +132,7 @@ func (s *Store) foldStepUsage(ctx context.Context, out map[int64]RepoStats, mete
 
 func (s *Store) foldProposalUsage(ctx context.Context, out map[int64]RepoStats, metered map[string]bool) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT repo_id, provider, cost_usd, created_at, updated_at
+		SELECT repo_id, kind, provider, cost_usd, created_at, updated_at
 		FROM proposals WHERE repo_id <> 0`)
 	if err != nil {
 		return fmt.Errorf("query repo proposals: %w", err)
@@ -138,13 +141,19 @@ func (s *Store) foldProposalUsage(ctx context.Context, out map[int64]RepoStats, 
 
 	for rows.Next() {
 		var id int64
-		var provider, created, updated string
+		var kind, provider, created, updated string
 		var cost float64
-		if err := rows.Scan(&id, &provider, &cost, &created, &updated); err != nil {
+		if err := rows.Scan(&id, &kind, &provider, &cost, &created, &updated); err != nil {
 			return fmt.Errorf("scan repo proposal: %w", err)
 		}
 		st := out[id]
-		st.Analyses++
+		// A pull is a proposal, but it is not an analysis: one conversation
+		// pulled three times has read the repository once and would otherwise
+		// claim to have analysed it three times. Its spend still folds, because
+		// it was still spent.
+		if kind != ProposalChat {
+			st.Analyses++
+		}
 		// An analysis that cost nothing never ran an agent — a draft, or one
 		// still on the wizard's first screen — so it contributes no turn and no
 		// time. Counting the wall clock between creating a draft and coming
@@ -152,6 +161,43 @@ func (s *Store) foldProposalUsage(ctx context.Context, out map[int64]RepoStats, 
 		if cost > 0 {
 			st.Turns++
 			st.AgentTime += span(created, updated)
+		}
+		addSpend(&st, provider, cost, metered)
+		out[id] = st
+	}
+	return rows.Err()
+}
+
+// foldChatUsage adds what the repository chats have cost.
+//
+// Without this a chat would be invisible in per-repo spend and in the nav's
+// running total — and it is the surface most likely to spend real money
+// casually, a question at a time, with nobody watching a figure.
+//
+// No agent time: a turn's wall clock is mostly the operator reading the last
+// answer and typing the next question, which is not time an agent spent.
+func (s *Store) foldChatUsage(ctx context.Context, out map[int64]RepoStats, metered map[string]bool) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.repo_id, t.provider, t.cost_usd
+		FROM chat_turns t JOIN chats c ON c.id = t.chat_id
+		WHERE c.repo_id <> 0`)
+	if err != nil {
+		return fmt.Errorf("query repo chat turns: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var provider string
+		var cost float64
+		if err := rows.Scan(&id, &provider, &cost); err != nil {
+			return fmt.Errorf("scan repo chat turn: %w", err)
+		}
+		st := out[id]
+		// The operator's own turns cost nothing and ran no agent. Counting them
+		// would double every conversation's turn count.
+		if cost > 0 {
+			st.Turns++
 		}
 		addSpend(&st, provider, cost, metered)
 		out[id] = st

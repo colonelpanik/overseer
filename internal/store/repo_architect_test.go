@@ -139,3 +139,66 @@ func TestProposalKindDesignAndSessionRoundTrip(t *testing.T) {
 		t.Errorf("Kind = %q, want analyse by default", plain.Kind)
 	}
 }
+
+func TestFailStrandedArchitectTurnsOnlyTouchesConversationsWaitingOnAReply(t *testing.T) {
+	// The design conversation derives busy from the operator having spoken
+	// last, exactly as the chat does, so a daemon restart mid-reply leaves the
+	// wizard saying "thinking…" with nothing coming. A conversation that has
+	// already been answered, or one that is over, must not be disturbed.
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	waiting, err := s.CreateProposal(ctx, Proposal{Kind: ProposalCreate, State: ProposalDesigning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answered, err := s.CreateProposal(ctx, Proposal{Kind: ProposalCreate, State: ProposalDesigning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	over, err := s.CreateProposal(ctx, Proposal{Kind: ProposalCreate, State: ProposalReady})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	add := func(id int64, speaker, body string) {
+		t.Helper()
+		if _, err := s.AddArchitectTurn(ctx, ArchitectTurn{
+			ProposalID: id, Speaker: speaker, Body: body,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(waiting.ID, SpeakerOperator, "asked just before the restart")
+	add(answered.ID, SpeakerOperator, "asked")
+	add(answered.ID, SpeakerArchitect, "answered")
+	add(over.ID, SpeakerOperator, "waiting, but the conversation is accepted")
+
+	n, err := s.FailStrandedArchitectTurns(ctx, "the daemon restarted")
+	if err != nil {
+		t.Fatalf("FailStrandedArchitectTurns: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cleared = %d, want 1", n)
+	}
+
+	turns, err := s.ArchitectTurns(ctx, waiting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := turns[len(turns)-1]
+	if last.Speaker != SpeakerArchitect || last.ErrMsg == "" {
+		t.Errorf("last turn = %+v, want an architect turn carrying the reason", last)
+	}
+	for _, id := range []int64{answered.ID, over.ID} {
+		turns, err := s.ArchitectTurns(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, turn := range turns {
+			if turn.ErrMsg != "" {
+				t.Errorf("proposal %d was disturbed: %+v", id, turn)
+			}
+		}
+	}
+}

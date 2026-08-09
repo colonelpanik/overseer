@@ -82,6 +82,11 @@ var addedColumns = []struct{ table, column, decl string }{
 	{"tasks", "subject", "TEXT NOT NULL DEFAULT ''"},
 	{"proposal_tasks", "subject", "TEXT NOT NULL DEFAULT ''"},
 	{"backlog", "subject", "TEXT NOT NULL DEFAULT ''"},
+	// Which conversation a task list was pulled out of. A plain integer rather
+	// than a foreign key: SQLite's ALTER TABLE ADD COLUMN only accepts a
+	// REFERENCES clause when the default is NULL, which is why proposals.repo_id
+	// above is a plain integer too.
+	{"proposals", "chat_id", "INTEGER NOT NULL DEFAULT 0"},
 }
 
 // migrate brings an existing database up to the current schema. It is

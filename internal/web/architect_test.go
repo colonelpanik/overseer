@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,8 +81,9 @@ func TestEveryDesignRouteRequiresSameOrigin(t *testing.T) {
 // The dashboard reloads on every state event, and the architect notifies every
 // couple of seconds while it answers. Without a guard, a reply box would be
 // wiped mid-sentence — so the guard has to exist and has to look at the box.
-func TestTheReloadGuardProtectsTheReplyBox(t *testing.T) {
-	s, _ := newTestServer(t)
+func TestTheReloadGuardProtectsEveryComposeBox(t *testing.T) {
+	s, st := newTestServer(t)
+	ctx := context.Background()
 	body := get(t, s, "/").Body.String()
 
 	if !strings.Contains(body, "holdsTyping") {
@@ -91,10 +93,41 @@ func TestTheReloadGuardProtectsTheReplyBox(t *testing.T) {
 	if !strings.Contains(body, "if (!holdsTyping()) location.reload();") {
 		t.Error("the change event no longer reloads at all")
 	}
-	// It must key off the reply box specifically, or it would freeze the whole
-	// dashboard whenever any input had focus.
-	if !strings.Contains(body, `getElementById("reply")`) {
-		t.Error("the guard does not look at the reply box")
+	// The contract between the script and the markup is a class, not one id,
+	// so a second conversation cannot be left unprotected by omission.
+	if !strings.Contains(body, `querySelectorAll(".holds-typing")`) {
+		t.Error("the guard no longer selects compose boxes by class")
+	}
+
+	// And every surface that has one actually carries it. Asserting on the
+	// rendered page rather than the template source is what makes this catch
+	// the real regression — a new conversation that forgot the class — while
+	// surviving any rewrite of the script itself.
+	p, err := st.CreateProposal(ctx, store.Proposal{
+		Kind: store.ProposalCreate, State: store.ProposalDesigning, Notes: "a thing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := st.UpsertRepo(ctx, store.Repo{Path: "/src/widget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateChat(ctx, repo.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Matched against the textarea itself, not anywhere on the page: the guard
+	// script names the class too, so a plain substring check would pass on a
+	// page whose box had lost it.
+	marked := regexp.MustCompile(`<textarea[^>]*class="[^"]*holds-typing`)
+	for _, page := range []string{
+		"/?wizard=" + itoa(p.ID),
+		"/?overlay=chat&repo=" + itoa(repo.ID),
+	} {
+		if !marked.MatchString(get(t, s, page).Body.String()) {
+			t.Errorf("%s has a compose box the reload guard will wipe", page)
+		}
 	}
 }
 
@@ -160,4 +193,7 @@ func TestDesigningANewProjectCreatesTheRepository(t *testing.T) {
 	if props[0].RepoPath != path {
 		t.Errorf("RepoPath = %q, want %q", props[0].RepoPath, path)
 	}
+	// The reply is detached on purpose, so it outlives the request. Waiting for
+	// it here is what keeps it from racing this test's own TempDir cleanup.
+	s.eng.Wait()
 }

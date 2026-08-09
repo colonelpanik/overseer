@@ -15,6 +15,10 @@ const (
 	ProposalAnalyse = "analyse"
 	// ProposalCreate designs and builds a repository that does not exist yet.
 	ProposalCreate = "create"
+	// ProposalChat is a task list pulled out of a conversation about a
+	// repository. Unlike the other two it does not own the thing that produced
+	// it: the chat carries on, and pulls again.
+	ProposalChat = "chat"
 )
 
 // Proposal states.
@@ -61,8 +65,10 @@ type Proposal struct {
 	// default branch. Shown on the first screen so the operator can see the
 	// wizard understood the repo before paying for an analysis.
 	Detected string
-	// Kind is analyse or create.
+	// Kind is analyse, create or chat.
 	Kind string
+	// ChatID is the conversation this task list was pulled out of, or zero.
+	ChatID int64
 	// Design is what the architect and the operator arrived at together.
 	Design string
 	// ArchitectSession is the agent session the conversation resumes into, so
@@ -109,7 +115,7 @@ type ProposalTask struct {
 }
 
 const proposalColumns = `id, repo_id, repo_path, source_url, state, focus, notes,
-	max_tasks, model, detected, kind, design, architect_session, provider,
+	max_tasks, model, detected, kind, chat_id, design, architect_session, provider,
 	cost_usd, input_tokens, output_tokens, transcript_path, err_msg,
 	created_at, updated_at`
 
@@ -129,12 +135,12 @@ func (s *Store) CreateProposal(ctx context.Context, p Proposal) (Proposal, error
 
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO proposals (repo_id, repo_path, source_url, state, focus, notes,
-			max_tasks, model, detected, kind, design, architect_session, provider,
+			max_tasks, model, detected, kind, chat_id, design, architect_session, provider,
 			cost_usd, input_tokens, output_tokens, transcript_path, err_msg,
 			created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.RepoID, p.RepoPath, p.SourceURL, p.State, strings.Join(p.Focus, "\n"),
-		p.Notes, p.MaxTasks, p.Model, p.Detected, p.Kind, p.Design,
+		p.Notes, p.MaxTasks, p.Model, p.Detected, p.Kind, p.ChatID, p.Design,
 		p.ArchitectSession, p.Provider, p.CostUSD,
 		p.InputTokens, p.OutputTokens, p.TranscriptPath, p.ErrMsg,
 		p.CreatedAt.Format(rfc3339), p.UpdatedAt.Format(rfc3339))
@@ -153,7 +159,7 @@ func scanProposal(sc interface{ Scan(...any) error }) (Proposal, error) {
 	var p Proposal
 	var focus, created, updated string
 	err := sc.Scan(&p.ID, &p.RepoID, &p.RepoPath, &p.SourceURL, &p.State, &focus,
-		&p.Notes, &p.MaxTasks, &p.Model, &p.Detected, &p.Kind, &p.Design,
+		&p.Notes, &p.MaxTasks, &p.Model, &p.Detected, &p.Kind, &p.ChatID, &p.Design,
 		&p.ArchitectSession, &p.Provider, &p.CostUSD,
 		&p.InputTokens, &p.OutputTokens, &p.TranscriptPath, &p.ErrMsg,
 		&created, &updated)
@@ -193,13 +199,13 @@ func (s *Store) SaveProposal(ctx context.Context, p Proposal) error {
 	p.UpdatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE proposals SET repo_id=?, repo_path=?, source_url=?, state=?,
-			focus=?, notes=?, max_tasks=?, model=?, detected=?, kind=?, design=?,
-			architect_session=?, provider=?,
+			focus=?, notes=?, max_tasks=?, model=?, detected=?, kind=?, chat_id=?,
+			design=?, architect_session=?, provider=?,
 			cost_usd=?, input_tokens=?, output_tokens=?, transcript_path=?,
 			err_msg=?, updated_at=?
 		WHERE id=?`,
 		p.RepoID, p.RepoPath, p.SourceURL, p.State, strings.Join(p.Focus, "\n"),
-		p.Notes, p.MaxTasks, p.Model, p.Detected, p.Kind, p.Design,
+		p.Notes, p.MaxTasks, p.Model, p.Detected, p.Kind, p.ChatID, p.Design,
 		p.ArchitectSession, p.Provider, p.CostUSD,
 		p.InputTokens, p.OutputTokens, p.TranscriptPath, p.ErrMsg,
 		p.UpdatedAt.Format(rfc3339), p.ID)

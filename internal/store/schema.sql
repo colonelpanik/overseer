@@ -196,10 +196,16 @@ CREATE TABLE IF NOT EXISTS proposals (
     model           TEXT NOT NULL DEFAULT '',
     detected        TEXT NOT NULL DEFAULT '',
     provider        TEXT NOT NULL DEFAULT '',
-    -- analyse | create. What the wizard is doing: reading a repository that
-    -- exists, or designing and building one that does not. Every row written
-    -- before this column existed is an analyse.
+    -- analyse | create | chat. What the wizard is doing: reading a repository
+    -- that exists, designing and building one that does not, or extracting a
+    -- task list from a conversation about one. Every row written before this
+    -- column existed is an analyse.
     kind            TEXT NOT NULL DEFAULT 'analyse',
+    -- The conversation this task list was pulled out of, or 0. Every pull makes
+    -- a new proposal and leaves the chat running, so one chat has many of these;
+    -- this is what finds them, and so what keeps the next pull from proposing
+    -- again what an earlier one already filed.
+    chat_id         INTEGER NOT NULL DEFAULT 0,
     -- The design the architect and the operator arrived at together. Held here
     -- rather than written into the repository during the conversation: an
     -- existing repository is mounted read-only for exactly the reason that
@@ -265,3 +271,69 @@ CREATE TABLE IF NOT EXISTS architect_turns (
 );
 
 CREATE INDEX IF NOT EXISTS idx_architect_turns_proposal ON architect_turns(proposal_id, id);
+
+-- A durable conversation about one repository: the operator asking questions
+-- and an agent answering from the read-only checkout.
+--
+-- Not a proposal, and not architect_turns. A proposal's states run
+-- designing -> ready -> queued and then stop, which is the right shape for
+-- something that produces one task list and is finished; a chat produces a task
+-- list whenever it is asked to and carries on afterwards. Living in proposals
+-- would also hide a chat the moment its first pull was queued, because
+-- ListProposals excludes queued rows — the exact opposite of what this is for.
+CREATE TABLE IF NOT EXISTS chats (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Always a real repository: a chat is grounded in a checkout, and there is
+    -- no useful conversation about nothing. It goes when the repository goes,
+    -- because a conversation about a repository that is gone cannot be resumed
+    -- and none of its claims can be checked against anything.
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    -- The agent session each turn resumes into, so the chat continues rather
+    -- than starting over. Cleared when a resume fails, which is what lets the
+    -- next turn re-seed from the stored turns instead of failing identically
+    -- for ever.
+    session     TEXT NOT NULL DEFAULT '',
+    -- When the operator started a fresh chat for this repository, or empty. An
+    -- archived chat stays readable and stops accepting turns: a long thread
+    -- that has wandered is a reason to start again, not a reason to lose it.
+    -- Deliberately not a state column — it is the only thing about a chat that
+    -- is not derivable from its turns.
+    archived_at TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- One live chat per repository, enforced here rather than by convention: two
+-- clicks would otherwise open two conversations against the same checkout, and
+-- the overlay can only ever show one of them.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chats_live ON chats(repo_id) WHERE archived_at = '';
+
+-- One turn of a repository chat.
+--
+-- Not architect_turns, whose proposal_id is NOT NULL REFERENCES proposals(id):
+-- that binds a turn to one proposal's lifetime, and these outlive every
+-- proposal they produce.
+CREATE TABLE IF NOT EXISTS chat_turns (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id       INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    -- operator | assistant
+    speaker       TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    -- Usage, on the assistant's turns only. A chat is used casually and often,
+    -- which is exactly how a surface spends real money without anyone noticing.
+    cost_usd      REAL NOT NULL DEFAULT 0,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Which configured provider served this turn, so subscription-covered usage
+    -- and usage metered against an endpoint the operator supplied can be told
+    -- apart rather than added into one misleading figure. Per turn, like
+    -- steps.provider, because the operator can change the role's provider
+    -- between one question and the next.
+    provider      TEXT NOT NULL DEFAULT '',
+    -- Why a turn produced no answer. Recorded as a turn rather than failing the
+    -- chat: the conversation is still there and they can ask again.
+    err_msg       TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_turns_chat ON chat_turns(chat_id, id);

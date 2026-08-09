@@ -736,3 +736,76 @@ func TestAReplyIsRecordedThroughACancelledContext(t *testing.T) {
 		t.Error("the reply recorded no usage; it was paid for either way")
 	}
 }
+
+func TestALostArchitectSessionIsReseededFromTheStoredTurns(t *testing.T) {
+	// Before this, architectTurn only tolerated a missing session on the
+	// opening turn — so a resume that failed at turn twenty failed identically
+	// for ever after, and an hour of design became unusable with no way back.
+	// The turns are in the database precisely so it can start again.
+	h := newHarness(t, writeScript(t, "claude", `
+for arg in "$@"; do
+  if [ "$arg" = "--resume" ]; then
+    printf '%s\n' 'session not found' >&2
+    exit 1
+  fi
+done
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"fresh-arch"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"carrying on"}]},"session_id":"fresh-arch"}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"fresh-arch","total_cost_usd":0.1,"usage":{"input_tokens":10,"output_tokens":5}}'
+`), "true")
+	ctx := context.Background()
+
+	// The opening turn passes no --resume, so it succeeds and records a
+	// session. The next turn would resume it, and cannot.
+	p, err := h.eng.StartDesign(ctx, "", "a CLI that syncs S3 buckets", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurns(t, h, p.ID, 2)
+	if err := h.eng.Say(ctx, p.ID, "one-way sync"); err != nil {
+		t.Fatal(err)
+	}
+	turns := waitForTurns(t, h, p.ID, 4)
+
+	if turns[3].ErrMsg != "" {
+		t.Errorf("a lost session should have been re-seeded, not recorded as a failure: %q", turns[3].ErrMsg)
+	}
+	if !strings.Contains(turns[3].Body, "carrying on") {
+		t.Errorf("fourth turn = %q", turns[3].Body)
+	}
+}
+
+func TestRecoverAnswersADesignConversationLeftWaiting(t *testing.T) {
+	// Busy is derived from the operator having spoken last, so nothing else
+	// would ever clear it and the wizard would spin for ever.
+	h := newHarness(t, fakeArchitect(t, "hello"), "true")
+	ctx := context.Background()
+
+	p, err := h.st.CreateProposal(ctx, store.Proposal{
+		Kind: store.ProposalCreate, State: store.ProposalDesigning, Notes: "a thing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.AddArchitectTurn(ctx, store.ArchitectTurn{
+		ProposalID: p.ID, Speaker: store.SpeakerOperator, Body: "asked just before the restart",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.eng.Recover(ctx); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	turns, err := h.st.ArchitectTurns(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := turns[len(turns)-1]
+	if last.Speaker != store.SpeakerArchitect || last.ErrMsg == "" {
+		t.Errorf("last turn = %+v, want an error turn clearing the wait", last)
+	}
+	// And the conversation is usable again rather than stuck.
+	if err := h.eng.Say(ctx, p.ID, "still here"); err != nil {
+		t.Errorf("the conversation should accept a turn again: %v", err)
+	}
+}

@@ -20,6 +20,7 @@ func (s *Server) buildDesign(ctx context.Context, p store.Proposal) (*DesignPane
 	}
 
 	d := &DesignPane{
+		Who:      "architect",
 		Spend:    money(spend),
 		Accepted: p.State != store.ProposalDesigning,
 		Target:   "a new project",
@@ -28,7 +29,7 @@ func (s *Server) buildDesign(ctx context.Context, p store.Proposal) (*DesignPane
 		d.Target = repoName(p.RepoPath)
 	}
 	for _, t := range turns {
-		d.Turns = append(d.Turns, DesignTurn{
+		d.Turns = append(d.Turns, ConvoTurn{
 			Speaker: t.Speaker,
 			Body:    t.Body,
 			When:    humanAge(t.CreatedAt),

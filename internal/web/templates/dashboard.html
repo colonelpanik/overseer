@@ -1,4 +1,23 @@
 <!doctype html>
+{{/* One conversation, rendered the same wherever it appears. The design pane
+     and the chat overlay are the same interaction and must not drift apart;
+     the caller supplies Who, since only it knows who is answering. */}}
+{{define "turns"}}
+<div class="turns">
+  {{range .Turns}}
+  <div class="turn {{if .Mine}}mine{{else}}theirs{{end}}{{if .Err}} bad{{end}}">
+    <div class="who"><span class="label">{{if .Mine}}you{{else}}{{$.Who}}{{end}}</span><span class="small">{{.When}}</span></div>
+    <div class="said">{{.Body}}</div>
+  </div>
+  {{end}}
+  {{if .Busy}}
+  <div class="turn theirs thinking">
+    <div class="who"><span class="pip"></span><span class="label">{{.Who}}</span></div>
+    <div class="said">thinking…</div>
+  </div>
+  {{end}}
+</div>
+{{end}}
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -48,6 +67,7 @@
     {{end}}
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "repos"}}">Repos</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "backlog"}}">Backlog{{if .OpenBacklog}} <span class="count">{{.OpenBacklog}}</span>{{end}}</a>
+    <a class="btn btn-secondary" href="{{.Q.URL "overlay" "chat"}}">Chat</a>
     <a class="btn btn-secondary" href="{{.Q.URL "overlay" "analyses"}}">Analyses</a>
     <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardDesign}}">Design something</a>
     <a class="btn btn-secondary" href="{{.Q.URL "wizard" wizardNew}}">Analyse a repo</a>
@@ -497,13 +517,17 @@
 <div class="backdrop top">
   <div class="sheet wizard">
     <div class="head">
-      <h4 style="margin:0">{{if .Designing}}Design it together{{else}}Analyse a repository{{end}}</h4>
+      <h4 style="margin:0">{{if eq .Kind "chat"}}Actions from the conversation{{else if .Designing}}Design it together{{else}}Analyse a repository{{end}}</h4>
+      {{if ne .Kind "chat"}}
+      {{/* A pull is one step. A rail with three done ticks on it would be
+           describing a journey that did not happen. */}}
       <ol class="steps-rail">
         <li class="{{if ge .Step 1}}done{{end}}{{if eq .Step 1}} on{{end}}">Source</li>
         <li class="{{if ge .Step 2}}done{{end}}{{if eq .Step 2}} on{{end}}">{{if .Designing}}Design{{else}}Focus{{end}}</li>
         <li class="{{if ge .Step 3}}done{{end}}{{if eq .Step 3}} on{{end}}">{{if eq .Kind "create"}}Scaffolding{{else}}Analysing{{end}}</li>
         <li class="{{if ge .Step 4}}done{{end}}{{if eq .Step 4}} on{{end}}">Review</li>
       </ol>
+      {{end}}
       <span class="spacer"></span>
       {{if .Spend}}<span class="small">{{.Spend}}</span>{{end}}
       <a class="btn btn-ghost" href="{{.CloseURL}}">close</a>
@@ -511,7 +535,7 @@
 
     {{if .Err}}
     <div class="wizard-error">
-      <span class="kicker">Analysis failed</span>
+      <span class="kicker">{{if eq .Kind "chat"}}The pull failed{{else}}Analysis failed{{end}}</span>
       <div>{{.Err}}</div>
     </div>
     {{end}}
@@ -632,26 +656,13 @@
           disagree where you disagree — this conversation decides what gets built. Nothing is
           queued and nothing is written until you accept.</div>
 
-        <div class="turns">
-          {{range .Turns}}
-          <div class="turn {{if .Mine}}mine{{else}}theirs{{end}}{{if .Err}} bad{{end}}">
-            <div class="who"><span class="label">{{if .Mine}}you{{else}}architect{{end}}</span><span class="small">{{.When}}</span></div>
-            <div class="said">{{.Body}}</div>
-          </div>
-          {{end}}
-          {{if .Busy}}
-          <div class="turn theirs thinking">
-            <div class="who"><span class="pip"></span><span class="label">architect</span></div>
-            <div class="said">thinking…</div>
-          </div>
-          {{end}}
-        </div>
+        {{template "turns" .}}
       </div>
 
       <form method="post" action="/design/{{$.Wizard.ID}}/say" class="convo-say">
-        {{/* id="reply" is what the reload guard looks for: the page reloads on
-             every state event, and would otherwise wipe this mid-sentence. */}}
-        <textarea class="input" id="reply" name="message" rows="3"
+        {{/* holds-typing is what the reload guard looks for: the page reloads
+             on every state event, and would otherwise wipe this mid-sentence. */}}
+        <textarea class="input holds-typing" id="reply" name="message" rows="3"
                   placeholder="Answer, push back, or change your mind…"></textarea>
         <div class="foot">
           <span class="small">{{.Spend}} so far · each reply is one agent turn</span>
@@ -744,14 +755,14 @@
         <span class="small">This page updates itself as the analysis runs.</span>
         <span class="spacer"></span>
         <form class="inline" method="post" action="/analyse/{{.ID}}/discard">
-          <button class="btn btn-secondary" type="submit">Cancel the analysis</button>
+          <button class="btn btn-secondary" type="submit">{{if eq .Kind "chat"}}Stop the pull{{else}}Cancel the analysis{{end}}</button>
         </form>
       </div>
 
     {{else}}
       <div class="body">
         {{if not .Rows}}
-          <p class="muted" style="font-size:13px;margin:0">The analysis produced nothing. Try again with different focus areas.</p>
+          <p class="muted" style="font-size:13px;margin:0">{{.EmptyNote}}</p>
         {{else}}
         <div class="small">{{len .Rows}} proposed · {{.Selected}} selected{{if .AlreadyQueued}} · {{.AlreadyQueued}} already queued{{end}} · {{.RepoPath}}</div>
         {{$wid := .ID}}
@@ -813,6 +824,7 @@
         {{end}}
         {{end}}
 
+        {{if ne .Kind "chat"}}
         <form method="post" action="/analyse/{{.ID}}/regenerate" class="regen">
           <div class="field">
             <label for="wfeedback">Not what you wanted? Say why and run it again</label>
@@ -821,10 +833,12 @@
           </div>
           <button class="btn btn-secondary" type="submit">Regenerate</button>
         </form>
+        {{end}}
       </div>
       <div class="foot">
         <span class="small">Queueing creates one branch and one draft pull request per task.</span>
         <span class="spacer"></span>
+        {{with .BackURL}}<a class="btn btn-secondary" href="{{.}}">Back to the chat</a>{{end}}
         <form class="inline" method="post" action="/analyse/{{.ID}}/discard">
           <button class="btn btn-secondary" type="submit">Discard</button>
         </form>
@@ -982,6 +996,7 @@
         </div>
         <div class="rowactions">
           <a class="btn btn-secondary" href="{{.BoardURL}}">Tasks</a>
+          <a class="btn btn-ghost" href="{{.ChatURL}}">Chat</a>
           <a class="btn {{if .Backlog}}btn-primary{{else}}btn-ghost{{end}}" href="{{.BacklogURL}}">
             Backlog{{if .Backlog}} {{.Backlog}}{{end}}
           </a>
@@ -1117,6 +1132,96 @@
       <span class="spacer"></span>
       <a class="btn btn-secondary" href="{{.CloseURL}}">Close</a>
     </div>
+  </div>
+</div>
+{{end}}
+
+{{with .Chat}}
+<div class="backdrop top">
+  <div class="sheet wizard">
+    <div class="head">
+      <h4 style="margin:0">Chat</h4>
+      <span class="small">{{if .RepoSlug}}{{.RepoSlug}}{{if .Spend}} · {{.Spend}} so far{{end}}{{else}}no repositories yet{{end}}</span>
+      <span class="spacer"></span>
+      {{if .BoardURL}}<a class="btn btn-secondary" href="{{.BoardURL}}">Its tasks</a>{{end}}
+      {{if and .ChatID .Turns}}
+      {{/* Its own form in the head, not a formaction on the compose box: a
+           nested form is dropped by the parser, and this acts on the whole
+           conversation rather than on the message being typed. */}}
+      <form class="inline" method="post" action="/chat/{{.ChatID}}/pull">
+        <button class="btn btn-primary" type="submit"
+                {{if .Busy}}disabled{{end}}{{with .Pull}}{{if .Running}} disabled{{end}}{{end}}
+                title="turn what this conversation decided into a reviewable task list">Pull actions</button>
+      </form>
+      <form class="inline" method="post" action="/chat/{{.ChatID}}/new">
+        <button class="btn btn-secondary" type="submit"
+                title="keep this one, and start a fresh conversation">New chat</button>
+      </form>
+      {{end}}
+      <a class="btn btn-ghost" href="{{.CloseURL}}">close</a>
+    </div>
+
+    {{if .Repos}}
+    <div class="repo-tabs">
+      {{range .Repos}}
+      <a class="chip{{if .On}} on{{end}}" href="{{.URL}}">{{.Slug}}</a>
+      {{end}}
+    </div>
+    {{end}}
+
+    {{with .Pull}}
+    {{if .Err}}
+    <div class="wizard-error">
+      <span class="label">the pull failed</span>
+      <span>{{.Err}}</span>
+    </div>
+    {{else}}
+    <div class="detected">
+      {{if .Running}}<span class="pip"></span>{{end}}
+      <span>{{.Label}}</span>
+      <span class="spacer"></span>
+      {{if .ReviewURL}}
+      <a class="btn {{if .Running}}btn-ghost{{else}}btn-primary{{end}}" href="{{.ReviewURL}}">{{if .Running}}watch it{{else}}Review them{{end}}</a>
+      {{end}}
+    </div>
+    {{end}}
+    {{end}}
+
+    {{if .Empty}}
+      <div class="body">
+        <div class="empty">
+          <div class="mark"></div>
+          <div class="title">No repositories yet</div>
+          <p class="muted" style="font-size:13px;max-width:44ch">Queue a task or run an analysis and one
+            registers itself; then you can ask about it here.</p>
+        </div>
+      </div>
+    {{else}}
+    <div class="body convo">
+      {{if .Turns}}
+        {{template "turns" $.Chat}}
+        {{if .Truncated}}<div class="small">{{.Truncated}}</div>{{end}}
+      {{else}}
+        <div class="small">Ask about {{.RepoSlug}} — why something works the way it does, what would
+          break if you changed it, where a thing lives. The checkout is mounted read-only, so nothing
+          here can edit it. When the conversation has decided something, pull the actions out and
+          they become a task list you review before anything runs.</div>
+      {{end}}
+    </div>
+
+    <form method="post" action="/chat" class="convo-say">
+      <input type="hidden" name="repo_id" value="{{.RepoID}}">
+      {{/* holds-typing keeps the reload guard off this box: the page reloads
+           on every state event and would otherwise wipe it mid-sentence. */}}
+      <textarea class="input holds-typing" id="chatsay" name="message" rows="3"
+                placeholder="Ask about this repository…"></textarea>
+      <div class="foot">
+        <span class="small">{{if .Spend}}{{.Spend}} so far · {{end}}each reply is one agent turn</span>
+        <span class="spacer"></span>
+        <button class="btn btn-secondary" type="submit" {{if .Busy}}disabled{{end}}>Send</button>
+      </div>
+    </form>
+    {{end}}
   </div>
 </div>
 {{end}}
@@ -1316,20 +1421,29 @@
   const live = document.getElementById("live");
   es.onopen = () => { live.textContent = "live"; };
   es.onerror = () => { live.textContent = "reconnecting…"; };
-  // The one exception to reloading on every event. A design conversation has a
-  // reply box, the daemon notifies every couple of seconds while the architect
-  // is answering, and a reload mid-sentence would throw away what the operator
-  // was typing. A stale page is a much smaller harm, and the next event after
-  // the box is empty catches up.
+  // The one exception to reloading on every event. A conversation has a compose
+  // box, the daemon notifies every couple of seconds while an agent is
+  // answering, and a reload mid-sentence would throw away what the operator was
+  // typing. A stale page is a much smaller harm, and the next event after the
+  // box is empty catches up.
+  //
+  // Opt-in by class rather than every textarea on the page: the wizard's notes
+  // and the proposed-task goals are pre-filled by the server, so "has content"
+  // would be permanently true there and an open wizard would stop updating
+  // altogether. Only the boxes the server never fills carry this.
   const holdsTyping = () => {
-    const reply = document.getElementById("reply");
-    return reply && (reply.value.trim() !== "" || document.activeElement === reply);
+    for (const box of document.querySelectorAll(".holds-typing")) {
+      if (box.value.trim() !== "" || document.activeElement === box) return true;
+    }
+    return false;
   };
   es.addEventListener("change", () => { if (!holdsTyping()) location.reload(); });
 
   // Keep the live pane pinned to the newest output across those reloads.
   const stream = document.getElementById("stream");
   if (stream) { stream.scrollTop = stream.scrollHeight; }
+  // And a conversation reads bottom-up, so it stays on the newest turn.
+  for (const c of document.querySelectorAll(".convo")) { c.scrollTop = c.scrollHeight; }
 </script>
 </body>
 </html>

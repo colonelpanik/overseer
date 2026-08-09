@@ -108,6 +108,27 @@ var validSeverities = map[string]bool{
 // returns ninety tasks is not obeying the brief, and truncating silently would
 // hide that.
 func ParseProposal(b []byte, max int) ([]ProposedTask, error) {
+	tasks, err := ParseActions(b, max)
+	if err != nil {
+		return nil, err
+	}
+	// An analysis that read a whole repository and found nothing worth doing
+	// has not succeeded, it has failed to read it. Presenting that as an empty
+	// review list would be indistinguishable from a clean repository.
+	if len(tasks) == 0 {
+		return nil, errors.New("parse proposal: no tasks proposed")
+	}
+	return tasks, nil
+}
+
+// ParseActions decodes a task list, accepting an empty one.
+//
+// This is the shared decode behind ParseProposal, and the whole of what the
+// chat's pull needs: a conversation asked for actions before anything was
+// agreed has correctly produced none, and refusing that would turn the normal
+// early state of every chat into a failure. The callers that do require work
+// to have been proposed say so themselves.
+func ParseActions(b []byte, max int) ([]ProposedTask, error) {
 	body := stripFence(strings.TrimSpace(string(b)))
 
 	var w proposalWire
@@ -133,15 +154,18 @@ func ParseProposal(b []byte, max int) ([]ProposedTask, error) {
 }
 
 // ValidateProposedTasks is the shared check behind every response that carries
-// a task list, whether it came from reading a repository or from designing one.
+// a task list, whether it came from reading a repository, from designing one,
+// or from a conversation about one.
 //
 // Every deviation is an error rather than a lenient default, for the same
 // reason ParseVerdict is strict: what comes back drives money being spent
 // without a further human decision on each item.
+//
+// An empty list is not checked here. Whether proposing nothing is a failure
+// depends entirely on what was asked — an analysis that found nothing has
+// failed, a conversation that has not decided anything yet has not — so each
+// caller states its own rule where a reader can see it.
 func ValidateProposedTasks(tasks []ProposedTask, max int) error {
-	if len(tasks) == 0 {
-		return errors.New("parse proposal: no tasks proposed")
-	}
 	if max > 0 && len(tasks) > max {
 		return fmt.Errorf("parse proposal: %d tasks proposed, the brief allowed %d",
 			len(tasks), max)
@@ -222,6 +246,11 @@ func ParseDesign(b []byte, max int) (string, []ProposedTask, error) {
 	}
 	if w.Tasks == nil {
 		return "", nil, errors.New(`parse design: missing "tasks"`)
+	}
+	// An architect that agreed a design and then proposed nothing to build it
+	// has ended the conversation with nothing to show for it.
+	if len(*w.Tasks) == 0 {
+		return "", nil, errors.New("parse design: no tasks proposed")
 	}
 	if err := ValidateProposedTasks(*w.Tasks, max); err != nil {
 		return "", nil, err
