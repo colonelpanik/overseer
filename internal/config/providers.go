@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -64,10 +65,22 @@ type Provider struct {
 	// BaseURL is the endpoint. Empty means the CLI's own default, which is
 	// how the vendor-hosted providers are configured.
 	BaseURL string `yaml:"base_url"`
-	// KeyEnv names the environment variable holding the API key. The key
-	// itself is never stored in the config file or the database, and never
-	// logged: only the operator's environment holds it.
+	// KeyEnv names the environment variable holding the credential, for a
+	// deployment that already keeps its secrets there — a systemd
+	// EnvironmentFile, a secrets manager that exports into the process.
 	KeyEnv string `yaml:"key_env"`
+	// Key is the credential itself, for the common case where this file is
+	// already the one place the operator configures the daemon.
+	//
+	// Holding it here is not weaker than holding it in an environment file:
+	// both are files on the same disk, owned by the same user, swept up by the
+	// same backup. The one thing that genuinely differs is that this file's
+	// mode is ours to check, so Load refuses to read a key out of a file that
+	// anyone else can read — the same posture ssh takes over a private key.
+	//
+	// Never rendered: the settings pane shows KeyEnv and whether a credential
+	// is present, never this.
+	Key string `yaml:"key"`
 	// Models are the models this provider may be asked for. The dashboard's
 	// dropdown is exactly this list.
 	Models []string `yaml:"models"`
@@ -82,6 +95,10 @@ type Role struct {
 	// Model is empty for the CLI's own default.
 	Model string `yaml:"model"`
 }
+
+// envVarName is what POSIX allows in an environment variable name. Anything
+// outside it in key_env is a credential somebody put in the wrong field.
+var envVarName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // agentProtocol is the wire protocol each CLI speaks. This is the constraint
 // that role assignment cannot escape: `claude` talks to an Anthropic-shaped
@@ -162,11 +179,26 @@ func (c Config) Bin(agent string) string {
 	return c.ClaudeBin
 }
 
-// KeyPresent reports whether a provider's key variable is set in the daemon's
-// environment. The dashboard shows this so a missing key is visible before a
-// task spends an iteration discovering it.
+// Credential is the secret to send, from whichever place holds it.
+//
+// Empty is a legitimate answer: against a vendor's own endpoint the CLI is
+// usually logged in through its own stored credentials, which is the common
+// case and needs nothing here.
+func (p Provider) Credential() string {
+	if p.Key != "" {
+		return p.Key
+	}
+	if p.KeyEnv == "" {
+		return ""
+	}
+	return os.Getenv(p.KeyEnv)
+}
+
+// KeyPresent reports whether a provider has a credential to send. The
+// dashboard shows this so a missing one is visible before a task spends an
+// iteration discovering it.
 func (p Provider) KeyPresent() bool {
-	return p.KeyEnv == "" || os.Getenv(p.KeyEnv) != ""
+	return p.Key != "" || p.KeyEnv == "" || os.Getenv(p.KeyEnv) != ""
 }
 
 // Metered reports whether usage against this provider is real money to the
@@ -216,10 +248,18 @@ func (c Config) validateProviders() error {
 			!strings.HasPrefix(p.BaseURL, "http://") {
 			return fmt.Errorf("provider %q has base_url %q, which is not an http(s) URL", name, p.BaseURL)
 		}
-		// A key in the file would end up in backups, in version control, and
-		// in every process that can read the daemon's data directory.
-		if strings.ContainsAny(p.KeyEnv, " \t\n=") {
-			return fmt.Errorf("provider %q: key_env %q must be the NAME of an environment variable, not a key",
+		// Naming both is ambiguous: a reader cannot tell which one is live, and
+		// ranking them silently means an edit to the wrong one does nothing.
+		if p.Key != "" && p.KeyEnv != "" {
+			return fmt.Errorf("provider %q sets both key and key_env; use one", name)
+		}
+		// Pasting the key into key_env is the easy slip, and its symptom is a
+		// role that cannot authenticate against an environment variable nobody
+		// ever set. An environment variable name is [A-Za-z_][A-Za-z0-9_]* by
+		// POSIX; anything else is a credential in the wrong field.
+		if p.KeyEnv != "" && !envVarName.MatchString(p.KeyEnv) {
+			return fmt.Errorf("provider %q: key_env %q looks like a credential, not the name of an "+
+				"environment variable. Put it in `key:` instead, or name the variable holding it",
 				name, p.KeyEnv)
 		}
 		for _, m := range p.Models {

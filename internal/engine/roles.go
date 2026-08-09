@@ -89,17 +89,18 @@ func (e *Engine) resolveRole(name string) (resolved, error) {
 		return resolved{}, err
 	}
 
-	var key string
-	if provider.KeyEnv != "" {
-		key = os.Getenv(provider.KeyEnv)
-		// An empty key is only a problem when the provider is a custom
-		// endpoint. Against the vendor default the CLI may be logged in
-		// through its own stored credentials, which is the common case.
-		if key == "" && provider.BaseURL != "" {
-			return resolved{}, fmt.Errorf(
-				"role %q uses provider %q, whose key_env %s is not set in the daemon's environment",
-				name, role.Provider, provider.KeyEnv)
+	// From the config file or from the environment, whichever holds it.
+	key := provider.Credential()
+	// An empty credential is only a problem when the provider is a custom
+	// endpoint. Against the vendor default the CLI may be logged in through
+	// its own stored credentials, which is the common case.
+	if key == "" && provider.BaseURL != "" {
+		where := "set `key:` on the provider, or name the environment variable in `key_env:`"
+		if provider.KeyEnv != "" {
+			where = fmt.Sprintf("%s is not set in the daemon's environment", provider.KeyEnv)
 		}
+		return resolved{}, fmt.Errorf("role %q uses provider %q, which has no credential: %s",
+			name, role.Provider, where)
 	}
 
 	r := resolved{

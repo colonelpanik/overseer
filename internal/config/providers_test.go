@@ -133,21 +133,29 @@ func TestConfigRejectsBadProviders(t *testing.T) {
 }
 
 func TestKeyEnvMustBeAVariableNameNotAKey(t *testing.T) {
-	// A key pasted into key_env would end up in backups and version control.
-	// The check is crude on purpose: anything that looks like a value rather
-	// than a name is refused.
-	path := writeConfig(t, `
+	// Pasting the credential into key_env is the easy slip, and its symptom is
+	// a role that cannot authenticate against a variable nobody ever set. The
+	// shapes below are not environment variable names by POSIX, so they are
+	// caught at load rather than mid-analysis.
+	//
+	// A token that happens to be spelled like a legal name — dcs_7abc — cannot
+	// be told apart from one, and this deliberately does not guess. That case
+	// is what `key:` is for, and the error says so.
+	for _, bad := range []string{"sk-live-abc123 def", "sk-ant-api03-Zm9v", "7starts-with-a-digit"} {
+		path := writeConfig(t, `
 providers:
-  x: {kind: openai, key_env: "sk-live-abc123 def", models: [m]}
+  x: {kind: openai, key_env: "`+bad+`", models: [m]}
 roles:
   review: {agent: codex, provider: x, model: m}
 `)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	if !strings.Contains(err.Error(), "NAME of an environment variable") {
-		t.Errorf("error = %v", err)
+		err := func() error { _, err := Load(path); return err }()
+		if err == nil {
+			t.Errorf("%q: expected an error", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "`key:`") {
+			t.Errorf("%q: the error should point at key:, got %v", bad, err)
+		}
 	}
 }
 
@@ -388,5 +396,119 @@ roles:
 	}
 	if c.Roles[RoleChat].Agent == "" {
 		t.Error("a config file that predates the chat role should still get its default")
+	}
+}
+
+func TestAKeyCanBeSetInTheConfigFile(t *testing.T) {
+	// An in-house endpoint needs a credential, and requiring a second file to
+	// hold it buys nothing: both are files on disk, owned by the same user,
+	// caught by the same backup. The one thing that does differ is who can
+	// read it, which is what the mode check below is for.
+	path := writeConfig(t, `
+providers:
+  inhouse:
+    kind: openai
+    base_url: https://llm.internal.example/v1
+    key: dcs_7XXXplaceholder
+    models: [kimi-k3]
+roles:
+  analyse: {agent: codex, provider: inhouse, model: kimi-k3}
+`)
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p := c.Providers["inhouse"]
+	if got := p.Credential(); got != "dcs_7XXXplaceholder" {
+		t.Errorf("Credential() = %q, want the key from the file", got)
+	}
+	if !p.KeyPresent() {
+		t.Error("a provider carrying its own key has a key present")
+	}
+}
+
+func TestKeyEnvStillWorksAndTheTwoAreNotBothAllowed(t *testing.T) {
+	// key_env stays the right answer for anyone who already has the secret in
+	// their environment. Naming both is ambiguous — a reader cannot tell which
+	// one is live — so it is refused rather than silently ranked.
+	t.Setenv("INHOUSE_LLM_KEY", "from-the-environment")
+	path := writeConfig(t, `
+providers:
+  inhouse:
+    kind: openai
+    base_url: https://llm.internal.example/v1
+    key_env: INHOUSE_LLM_KEY
+    models: [kimi-k3]
+roles:
+  analyse: {agent: codex, provider: inhouse, model: kimi-k3}
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := c.Providers["inhouse"].Credential(); got != "from-the-environment" {
+		t.Errorf("Credential() = %q, want the environment's value", got)
+	}
+
+	both := writeConfig(t, `
+providers:
+  inhouse:
+    kind: openai
+    base_url: https://llm.internal.example/v1
+    key: in-the-file
+    key_env: INHOUSE_LLM_KEY
+    models: [kimi-k3]
+`)
+	if err := os.Chmod(both, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(both); err == nil {
+		t.Error("naming both key and key_env should be refused as ambiguous")
+	}
+}
+
+func TestAKeyInAReadableConfigFileIsRefused(t *testing.T) {
+	// The one real difference between holding the secret here and holding it in
+	// the environment: this file's mode is visible and checkable, so it gets
+	// checked. Same posture ssh takes over a private key, and the same fix.
+	path := writeConfig(t, `
+providers:
+  inhouse:
+    kind: openai
+    base_url: https://llm.internal.example/v1
+    key: dcs_7XXXplaceholder
+    models: [kimi-k3]
+`)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("a key in a world-readable config should be refused")
+	}
+	if !strings.Contains(err.Error(), "chmod 600") {
+		t.Errorf("the error should say how to fix it, got: %v", err)
+	}
+}
+
+func TestTheModeIsOnlyCheckedWhenAKeyIsActuallyInTheFile(t *testing.T) {
+	// Every existing config file is 0644 and contains no secret. Refusing
+	// those would break every install to protect nothing.
+	path := writeConfig(t, `
+providers:
+  inhouse:
+    kind: openai
+    base_url: https://llm.internal.example/v1
+    key_env: INHOUSE_LLM_KEY
+    models: [kimi-k3]
+`)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Errorf("a config with no key in it should load at any mode: %v", err)
 	}
 }
