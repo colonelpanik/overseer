@@ -84,6 +84,11 @@ type Provider struct {
 	// Models are the models this provider may be asked for. The dashboard's
 	// dropdown is exactly this list.
 	Models []string `yaml:"models"`
+	// WireAPI is the protocol an OpenAI-shaped endpoint speaks: "responses" or
+	// "chat". Empty means responses, which is the only one codex 0.147 still
+	// accepts — it refuses wire_api = "chat" at config load. Meaningless for an
+	// Anthropic-shaped endpoint, which has one shape.
+	WireAPI string `yaml:"wire_api"`
 }
 
 // Role binds one job in the loop to an agent, a provider and a model.
@@ -266,6 +271,11 @@ func (c Config) validateProviders() error {
 			if strings.TrimSpace(m) == "" {
 				return fmt.Errorf("provider %q lists an empty model name", name)
 			}
+		}
+		switch p.WireAPI {
+		case "", "responses", "chat":
+		default:
+			return fmt.Errorf("provider %q has wire_api %q, want \"responses\" or \"chat\"", name, p.WireAPI)
 		}
 	}
 

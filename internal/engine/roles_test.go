@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"overseer/internal/agent"
 	"overseer/internal/config"
 	"overseer/internal/sandbox"
 	"overseer/internal/store"
@@ -33,11 +34,17 @@ func TestResolveRoleUsesTheConfiguredAgentAndModel(t *testing.T) {
 	if !r.Writable {
 		t.Error("the coder must get a writable worktree whichever CLI it runs through")
 	}
-	if r.Env["OPENAI_BASE_URL"] != "https://llm.dc.internal/v1" {
-		t.Errorf("env = %v, want the endpoint", r.Env)
+	// The endpoint reaches codex on its command line, not in its environment:
+	// with a ChatGPT login it ignores OPENAI_BASE_URL entirely.
+	if r.BaseURL != "https://llm.dc.internal/v1" {
+		t.Errorf("BaseURL = %q, want the endpoint", r.BaseURL)
 	}
-	if r.Env["OPENAI_API_KEY"] != "secret-value" {
+	if r.Env[agent.CodexKeyEnv] != "secret-value" {
 		t.Errorf("env did not carry the key read from OVERSEER_TEST_LLM_KEY")
+	}
+	joined := strings.Join(r.args("go", "", "", ""), " ")
+	if !strings.Contains(joined, `base_url="https://llm.dc.internal/v1"`) {
+		t.Errorf("argv does not route to the endpoint: %s", joined)
 	}
 
 	// And the argv carries the model.

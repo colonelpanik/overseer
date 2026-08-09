@@ -23,9 +23,15 @@ func TestProviderEnvPointsEachCLIAtItsEndpoint(t *testing.T) {
 		t.Errorf("claude env = %v, want no second credential", claude)
 	}
 
+	// codex gets only the credential. Its endpoint cannot travel here: with a
+	// ChatGPT login it ignores OPENAI_BASE_URL and talks to OpenAI anyway, so
+	// CodexArgs states it as a named provider instead.
 	codex := ProviderEnv("codex", KindOpenAI, "https://llm.dc.internal/v1", "sk-x")
-	if codex["OPENAI_BASE_URL"] != "https://llm.dc.internal/v1" || codex["OPENAI_API_KEY"] != "sk-x" {
-		t.Errorf("codex env = %v", codex)
+	if codex[CodexKeyEnv] != "sk-x" {
+		t.Errorf("codex env = %v, want the credential under %s", codex, CodexKeyEnv)
+	}
+	if _, ok := codex["OPENAI_BASE_URL"]; ok {
+		t.Errorf("codex env = %v, want no endpoint: it would be silently ignored", codex)
 	}
 }
 
