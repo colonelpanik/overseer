@@ -74,7 +74,34 @@ type Engine struct {
 	// them on every agent invocation.
 	providers map[string]config.Provider
 	roles     map[string]config.Role
+
+	// detached counts the background turns — an architect reply, an analysis,
+	// a clone, a scaffold — that outlive the request that started them. They
+	// are deliberately not cancelled when that request ends, so without this
+	// nothing can tell whether one is still writing under DataDir.
+	detached sync.WaitGroup
 }
+
+// background runs fn as one of the detached turns Wait blocks on.
+//
+// Every caller here starts work that outlives its request on purpose, so the
+// goroutine cannot be tied to the request context. Counting them is what makes
+// the difference between "detached" and "untrackable".
+func (e *Engine) background(fn func()) {
+	e.detached.Add(1)
+	go func() {
+		defer e.detached.Done()
+		fn()
+	}()
+}
+
+// Wait blocks until every detached turn has finished.
+//
+// A shutdown wants this so a half-written transcript is not left behind, and a
+// test wants it because its temporary DataDir is deleted the moment the test
+// returns — a turn still creating proposals/<id>/ underneath that deletion is
+// a race the test loses.
+func (e *Engine) Wait() { e.detached.Wait() }
 
 // New builds an Engine and materialises the verdict schema on disk.
 func New(cfg config.Config, st *store.Store, wtm *worktree.Manager, pr worktree.PROpener) (*Engine, error) {
@@ -509,6 +536,24 @@ func (e *Engine) failTask(ctx context.Context, task *store.Task, cause error) er
 // dispatch performs one action and returns its outcome. A failing agent
 // yields an Outcome with Failed set, not an error; dispatch's error return is
 // for failures of the machinery itself.
+// timesRaised counts how often each blocking summary has been raised on this
+// task, for the recurrence markers in ReviseWithFindingsPrompt.
+//
+// A failure here returns nil rather than an error, which renders the prompt in
+// its plain form. The counts sharpen the wording of a revision that is
+// happening either way, and failing the task over a lost annotation would
+// trade a real turn for a cosmetic one. The reviewing step it counts has
+// already been committed by the time this runs, so its own findings are in the
+// tally.
+func (e *Engine) timesRaised(ctx context.Context, taskID int64) map[string]int {
+	raised, err := e.Store.BlockingSummaryCounts(ctx, taskID)
+	if err != nil {
+		e.logf("task %d: count recurring findings: %v", taskID, err)
+		return nil
+	}
+	return raised
+}
+
 func (e *Engine) dispatch(ctx context.Context, task *store.Task, action loop.Action) (*loop.Outcome, error) {
 	switch action.Kind {
 	case loop.ActSetupWorktree:
@@ -519,14 +564,16 @@ func (e *Engine) dispatch(ctx context.Context, task *store.Task, action loop.Act
 
 	case loop.ActClaudePlanResume:
 		return e.runClaude(ctx, task, "plan",
-			ReviseWithFindingsPrompt("PLAN.md", action.Findings), action.ResumeSessionID)
+			ReviseWithFindingsPrompt("PLAN.md", action.Findings, e.timesRaised(ctx, task.ID)),
+			action.ResumeSessionID)
 
 	case loop.ActClaudeExec:
 		return e.runClaude(ctx, task, "exec", ExecPrompt(task.Goal), "")
 
 	case loop.ActClaudeExecResume:
 		return e.runClaude(ctx, task, "exec",
-			ReviseWithFindingsPrompt("the code", action.Findings), action.ResumeSessionID)
+			ReviseWithFindingsPrompt("the code", action.Findings, e.timesRaised(ctx, task.ID)),
+			action.ResumeSessionID)
 
 	case loop.ActVerify:
 		return e.runVerify(ctx, task)
@@ -894,7 +941,7 @@ func (e *Engine) finish(ctx context.Context, task *store.Task) (*loop.Outcome, e
 	}
 	url, err := e.PR.Open(ctx, worktree.PRRequest{
 		Worktree:   wt,
-		Title:      worktree.PRTitle(task.Goal),
+		Title:      worktree.PRTitle(task.Headline()),
 		Body:       worktree.PRBody(task.Goal, string(plan), "No blocking findings remained."),
 		BaseBranch: base,
 	})

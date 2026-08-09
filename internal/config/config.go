@@ -190,6 +190,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("sandbox %q must be auto, bwrap or off", c.Sandbox)
 	}
 
+	// Zero is not "no limit" here, unlike the advisory run_cap_usd and
+	// task_cap_usd below: this is the number of iterations a phase gets, and
+	// a phase with none escalates to a human before it does any work.
+	if c.MaxIterations <= 0 {
+		return fmt.Errorf("max_iterations must be positive (it is the per-phase iteration budget, not a cap that zero disables), got %d", c.MaxIterations)
+	}
 	if c.StepTimeout <= 0 {
 		return fmt.Errorf("step_timeout must be positive, got %s", c.StepTimeout)
 	}

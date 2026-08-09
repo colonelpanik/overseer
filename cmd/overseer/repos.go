@@ -123,9 +123,14 @@ func cmdBacklog(cfg config.Config, ref string) error {
 			if item.State != store.BacklogOpen && ref == "" {
 				continue
 			}
-			title := item.Title
-			if len(title) > 64 {
-				title = title[:61] + "..."
+			// The headline, not the title: this column is one line of a table,
+			// and an analysis's title is a paragraph.
+			title := item.Headline()
+			// Runes, for the same reason PRTitle counts them — a headline is
+			// bounded to 72 runes and this column to 64, so the cut really does
+			// happen, and slicing bytes would land mid-character.
+			if r := []rune(title); len(r) > 64 {
+				title = strings.TrimRight(string(r[:61]), " ,;:-") + "..."
 			}
 			sev := item.Severity
 			if sev == "" {

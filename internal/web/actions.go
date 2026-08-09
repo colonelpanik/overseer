@@ -22,6 +22,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	bt := engine.BatchTask{
 		Repo:             repo,
+		Subject:          strings.TrimSpace(r.FormValue("subject")),
 		Goal:             goal,
 		BlockingSeverity: strings.TrimSpace(r.FormValue("blocking_severity")),
 		Verify:           strings.TrimSpace(r.FormValue("verify")),

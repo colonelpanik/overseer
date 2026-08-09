@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS backlog (
     repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     -- analysis | review | manual
     source      TEXT NOT NULL,
+    -- The one line this item is listed under. `title` keeps holding the full
+    -- text, because the fingerprint below is taken from it and PromoteBacklogItem
+    -- turns it back into a task's goal: shortening it in place would both split
+    -- the dedupe and truncate the instruction.
+    subject     TEXT NOT NULL DEFAULT '',
     title       TEXT NOT NULL,
     detail      TEXT NOT NULL DEFAULT '',
     evidence    TEXT NOT NULL DEFAULT '',
@@ -73,6 +78,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- repository's history add up.
     repo_id           INTEGER NOT NULL DEFAULT 0,
     repo_path         TEXT NOT NULL,
+    -- The one line this task is listed under, written by whatever proposed it.
+    -- Empty means nobody supplied one — a task file, the add form, a row
+    -- written before this column — and the reader derives one from the goal
+    -- instead. Nothing backfills it: deriving at read time costs nothing and
+    -- an UPDATE over every historical row buys nothing.
+    subject           TEXT NOT NULL DEFAULT '',
     goal              TEXT NOT NULL,
     constraints       TEXT NOT NULL DEFAULT '',
     state             TEXT NOT NULL,
@@ -224,6 +235,7 @@ CREATE TABLE IF NOT EXISTS proposal_tasks (
     proposal_id     INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
     ord             INTEGER NOT NULL,
     key             TEXT NOT NULL,
+    subject         TEXT NOT NULL DEFAULT '',
     goal            TEXT NOT NULL,
     constraints     TEXT NOT NULL DEFAULT '',
     verify          TEXT NOT NULL DEFAULT '',

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,8 @@ import (
 	"overseer/internal/store"
 )
 
-// StartDesign opens a design conversation.
+// StartDesign opens a design conversation and hands the architect's opening
+// turn to a goroutine.
 //
 // The repository is optional. With one, the architect reads it and its
 // questions are grounded in what is actually there; without one, the
@@ -22,7 +24,49 @@ import (
 // follows is scaffolding rather than a redesign. It cannot be inferred from the
 // path being empty: the wizard creates the project first, precisely so the
 // architect has somewhere real to work.
+//
+// For a caller that will not outlive the turn, see StartDesignAndWait.
 func (e *Engine) StartDesign(ctx context.Context, repoRef, brief string, newProject bool) (store.Proposal, error) {
+	created, err := e.openDesign(ctx, repoRef, brief, newProject)
+	if err != nil {
+		return store.Proposal{}, err
+	}
+	// The error is dropped on purpose: there is nobody here to hand it to, and
+	// the recorded turn is what the dashboard reads.
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.architectTurn(bg, created.ID, "") })
+	return created, nil
+}
+
+// StartDesignAndWait is StartDesign with the opening turn run here rather than
+// in a goroutine, so it returns only once the reply — or the failure — has been
+// recorded.
+//
+// For a caller that will not outlive the turn. `overseer new` is one process
+// doing one thing: it owns the store and closes it on the way out, so
+// scheduling the turn and returning killed it mid-flight and closed the
+// database under whatever was left, then pointed the operator at a conversation
+// containing nothing but their own brief. The dashboard is the opposite case
+// and keeps StartDesign: it is long-running, and a turn that lands after the
+// HTTP response is the whole design.
+//
+// A turn that produced no reply is an error here even though it was also
+// recorded as a turn: the conversation survives it (see architectTurn), but a
+// caller that waited for the opening reply did not get one. The proposal is
+// returned either way, because it exists either way and is where the operator
+// should be sent.
+func (e *Engine) StartDesignAndWait(ctx context.Context, repoRef, brief string, newProject bool) (store.Proposal, error) {
+	created, err := e.openDesign(ctx, repoRef, brief, newProject)
+	if err != nil {
+		return store.Proposal{}, err
+	}
+	return created, e.architectTurn(ctx, created.ID, "")
+}
+
+// openDesign creates the proposal and records the brief as the operator's first
+// turn: everything the two entry points share, up to the point where they
+// differ on who waits for the reply.
+func (e *Engine) openDesign(ctx context.Context, repoRef, brief string, newProject bool) (store.Proposal, error) {
 	if strings.TrimSpace(brief) == "" {
 		return store.Proposal{}, fmt.Errorf("say what you want built, or changed")
 	}
@@ -62,7 +106,6 @@ func (e *Engine) StartDesign(ctx context.Context, repoRef, brief string, newProj
 	}); err != nil {
 		return store.Proposal{}, err
 	}
-	go e.architectTurn(context.WithoutCancel(ctx), created.ID, "")
 	return created, nil
 }
 
@@ -97,7 +140,10 @@ func (e *Engine) Say(ctx context.Context, proposalID int64, message string) erro
 	}
 	e.notifyProposal()
 
-	go e.architectTurn(context.WithoutCancel(ctx), proposalID, message)
+	// The error is dropped on purpose, as in StartDesign: the recorded turn is
+	// what the dashboard reads.
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.architectTurn(bg, proposalID, message) })
 	return nil
 }
 
@@ -112,16 +158,33 @@ func (e *Engine) architectBusy(ctx context.Context, proposalID int64) bool {
 	return last.Speaker == store.SpeakerOperator
 }
 
+// interruptedMsg is what a turn the operator stopped records as its reason.
+//
+// Ctrl-C reaches the recording under three different disguises: the runner
+// reports the SIGKILLed agent as "signal: killed" — or as whatever it happened
+// to print as it died, which is exactly what a crash reports too — while the
+// store reports the dead context as "context canceled", from the read before
+// the turn or the write after it. None of them says what happened. This does.
+const interruptedMsg = "interrupted before the architect replied"
+
 // architectTurn runs one reply and records it.
 //
 // A failure is recorded as a turn rather than failing the proposal: the
 // conversation is still there, and the operator can say something else or try
 // again. Losing an hour of design to one timed-out reply would be the worst
 // possible failure mode for this surface.
-func (e *Engine) architectTurn(ctx context.Context, proposalID int64, message string) {
+//
+// The error it returns is for a caller waiting on this turn —
+// StartDesignAndWait, and through it `overseer new`. It is non-nil whenever the
+// architect produced no reply, including the recorded-failure cases above.
+// Background callers discard it: for them the recorded turn is the report.
+func (e *Engine) architectTurn(ctx context.Context, proposalID int64, message string) error {
 	p, err := e.Store.GetProposal(ctx, proposalID)
 	if err != nil {
-		return
+		// Not returned bare, as this used to be. A read that failed because the
+		// operator pressed Ctrl-C a moment ago is the commonest way into this
+		// branch, and returning without writing anything is the wedge.
+		return e.failArchitectTurn(ctx, proposalID, err.Error())
 	}
 
 	res, err := e.runArchitect(ctx, &p, e.architectPrompt(ctx, p, message, false), "architect")
@@ -129,36 +192,61 @@ func (e *Engine) architectTurn(ctx context.Context, proposalID int64, message st
 	// lost at turn twenty made every turn after it fail identically, for ever,
 	// and an hour of design became unusable with no way back. The turns are in
 	// the database precisely so the conversation can be started again.
-	if p.ArchitectSession != "" && (err != nil || res.ErrMsg != "") {
+	//
+	// Not attempted when the operator interrupted this one. A cancelled turn is
+	// not a lost session, and starting a second agent after a Ctrl-C would
+	// spend money on a reply nobody is waiting for.
+	if p.ArchitectSession != "" && (err != nil || res.ErrMsg != "") &&
+		!res.Canceled && ctx.Err() == nil {
 		p.ArchitectSession = ""
 		if saveErr := e.Store.SaveProposal(ctx, p); saveErr == nil {
 			res, err = e.runArchitect(ctx, &p, e.architectPrompt(ctx, p, message, true), "architect")
 		}
 	}
 	if err != nil {
-		e.recordArchitectFailure(ctx, proposalID, err.Error())
-		return
+		return e.failArchitectTurn(ctx, proposalID, err.Error())
+	}
+	// Before ErrMsg, which by now holds whatever the agent printed as it was
+	// killed: asking IsAuthFailure about that could pause the whole run on the
+	// strength of a dying agent's last words.
+	if res.Canceled {
+		return e.failArchitectTurn(ctx, proposalID, interruptedMsg)
 	}
 	if res.ErrMsg != "" {
 		if agent.IsAuthFailure(res.ErrMsg) {
 			e.Pause(fmt.Sprintf("the architect is not authenticated: %s", res.ErrMsg))
 		}
-		e.recordArchitectFailure(ctx, proposalID, res.ErrMsg)
-		return
+		return e.failArchitectTurn(ctx, proposalID, res.ErrMsg)
 	}
 
 	body := strings.TrimSpace(res.FinalText)
 	if body == "" {
-		e.recordArchitectFailure(ctx, proposalID, "the architect replied with nothing")
-		return
+		return e.failArchitectTurn(ctx, proposalID, "the architect replied with nothing")
 	}
-	if _, err := e.Store.AddArchitectTurn(ctx, store.ArchitectTurn{
+	return e.recordArchitectReply(ctx, proposalID, body, res)
+}
+
+// recordArchitectReply appends the architect's reply.
+//
+// Its own function because of the context it writes with. A SIGINT landing
+// between runArchitect returning a good reply and this insert is a window of
+// two statements — not something a test can schedule — and with ctx it would
+// throw away a turn that happened, that was paid for, and that leaves the
+// conversation unusable by its absence. Detached, that window does not exist,
+// and the invariant is provable on its own rather than by racing it.
+//
+// Which also means a turn interrupted here reports success. That is right: the
+// architect replied, the reply is on the record, and the interruption arrived
+// after everything the caller asked for had already happened.
+func (e *Engine) recordArchitectReply(ctx context.Context, proposalID int64, body string, res agent.Result) error {
+	if _, err := e.Store.AddArchitectTurn(context.WithoutCancel(ctx), store.ArchitectTurn{
 		ProposalID: proposalID, Speaker: store.SpeakerArchitect, Body: body,
 		CostUSD: res.CostUSD, InputTokens: res.InputTokens, OutputTokens: res.OutputTokens,
 	}); err != nil {
-		return
+		return err
 	}
 	e.notifyProposal()
+	return nil
 }
 
 // architectPrompt builds one turn's prompt.
@@ -185,15 +273,31 @@ func (e *Engine) architectPrompt(ctx context.Context, p store.Proposal, message 
 	return prompt
 }
 
-func (e *Engine) recordArchitectFailure(ctx context.Context, proposalID int64, msg string) {
-	if _, err := e.Store.AddArchitectTurn(ctx, store.ArchitectTurn{
+// failArchitectTurn records the failure as a turn — which is what keeps the
+// conversation alive — and returns it, for a caller that was waiting on the
+// reply. A store error displaces it: not being able to write the turn is the
+// more serious of the two failures and the one worth reporting.
+func (e *Engine) failArchitectTurn(ctx context.Context, proposalID int64, msg string) error {
+	// ctx is asked rather than the message inspected: every failure path in
+	// architectTurn arrives here, and a cancelled context is the one thing that
+	// explains all of them. See interruptedMsg.
+	if ctx.Err() != nil {
+		msg = interruptedMsg
+	}
+	// Detached on purpose, the same way failTask and FinishStep are. The turn
+	// really did fail, and writing that with the context that has just been
+	// cancelled is how the failure goes unrecorded — leaving the conversation
+	// with the operator as its last speaker, which architectBusy reads as "a
+	// reply is still coming", so Say refuses it and it can never be continued.
+	if _, err := e.Store.AddArchitectTurn(context.WithoutCancel(ctx), store.ArchitectTurn{
 		ProposalID: proposalID, Speaker: store.SpeakerArchitect,
 		Body:   "I could not reply: " + msg,
 		ErrMsg: msg,
 	}); err != nil {
-		return
+		return err
 	}
 	e.notifyProposal()
+	return errors.New(msg)
 }
 
 // Accept ends the conversation: the architect writes the design down and
@@ -217,7 +321,8 @@ func (e *Engine) Accept(ctx context.Context, proposalID int64) error {
 	}
 	e.notifyProposal()
 
-	go e.accept(context.WithoutCancel(ctx), proposalID)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.accept(bg, proposalID) })
 	return nil
 }
 
@@ -237,8 +342,10 @@ func (e *Engine) accept(ctx context.Context, proposalID int64) {
 	rows := make([]store.ProposalTask, 0, len(tasks))
 	for i, t := range tasks {
 		rows = append(rows, store.ProposalTask{
-			Ord:         i,
-			Key:         strings.TrimSpace(t.KeyOrEmpty()),
+			Ord: i,
+			Key: strings.TrimSpace(t.KeyOrEmpty()),
+			// The architect's subject, or one derived from the goal.
+			Subject:     store.SubjectOr(t.SubjectOrEmpty(), t.GoalOrEmpty()),
 			Goal:        strings.TrimSpace(t.GoalOrEmpty()),
 			Constraints: t.Constraints,
 			Verify:      strings.TrimSpace(t.VerifyOrEmpty()),
@@ -278,7 +385,8 @@ func (e *Engine) accept(ctx context.Context, proposalID int64) {
 	e.notifyProposal()
 
 	if p.Kind == store.ProposalCreate {
-		go e.scaffold(context.WithoutCancel(ctx), p.ID)
+		bg := context.WithoutCancel(ctx)
+		e.background(func() { e.scaffold(bg, p.ID) })
 	}
 }
 
@@ -382,10 +490,15 @@ func (e *Engine) runArchitect(ctx context.Context, p *store.Proposal, prompt, la
 	// Remember the session so the next turn continues this one rather than
 	// starting over. Recorded even on a failed turn: the session exists either
 	// way, and losing it would silently restart the conversation.
+	//
+	// Detached for the same reason FinishStep is. On a cancelled turn this write
+	// would otherwise fail, and the error would surface as the turn's recorded
+	// reason — "context canceled" in place of the honest one — while the session
+	// the operator would resume from is thrown away.
 	if res.SessionID != "" && res.SessionID != p.ArchitectSession {
 		p.ArchitectSession = res.SessionID
 		p.TranscriptPath = transcript
-		if err := e.Store.SaveProposal(ctx, *p); err != nil {
+		if err := e.Store.SaveProposal(context.WithoutCancel(ctx), *p); err != nil {
 			return res, err
 		}
 	}

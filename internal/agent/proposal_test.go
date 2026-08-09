@@ -250,3 +250,48 @@ func TestProposalSchemaIsEmbedded(t *testing.T) {
 		}
 	}
 }
+
+func TestParseProposalReadsTheSubject(t *testing.T) {
+	body := `{"tasks":[{"key":"cache","subject":"Cache the rack inventory query",` +
+		`"goal":"Add a cached projection of the rack inventory query. It recomputes the whole join per request.",` +
+		`"constraints":[],"verify":"go test ./...","blocking_severity":"any",` +
+		`"cost_cap":null,"depends_on":[],"rationale":"why","evidence":["a.go:1"]}]}`
+	tasks, err := ParseProposal([]byte(body), 12)
+	if err != nil {
+		t.Fatalf("ParseProposal: %v", err)
+	}
+	if got := tasks[0].SubjectOrEmpty(); got != "Cache the rack inventory query" {
+		t.Errorf("subject = %q, want the one in the response", got)
+	}
+}
+
+func TestParseProposalAcceptsAResponseWithNoSubject(t *testing.T) {
+	// The strictness this parser is otherwise famous for exists because what
+	// comes back drives money being spent. A subject drives a title, so a
+	// model that omits it must not cost the operator the whole analysis: the
+	// engine derives one from the goal instead.
+	body := `{"tasks":[{"key":"cache","goal":"Do the thing.","constraints":[],` +
+		`"verify":null,"blocking_severity":"any","cost_cap":null,` +
+		`"depends_on":[],"rationale":"why","evidence":[]}]}`
+	tasks, err := ParseProposal([]byte(body), 12)
+	if err != nil {
+		t.Fatalf("ParseProposal: %v", err)
+	}
+	if got := tasks[0].SubjectOrEmpty(); got != "" {
+		t.Errorf("subject = %q, want empty so the caller can derive one", got)
+	}
+}
+
+func TestParseDesignReadsTheSubject(t *testing.T) {
+	body := `{"design":"# It","tasks":[{"key":"scaffold","subject":"Scaffold the module",` +
+		`"goal":"Create the module layout and a passing test command.","constraints":[],` +
+		`"verify":"go test ./...","blocking_severity":"any","cost_cap":null,` +
+		`"depends_on":[],"rationale":"why","evidence":[]}]}`
+	_, tasks, err := ParseDesign([]byte(body), 12)
+	if err != nil {
+		t.Fatalf("ParseDesign: %v", err)
+	}
+	if got := tasks[0].SubjectOrEmpty(); got != "Scaffold the module" {
+		t.Errorf("subject = %q, want the one in the response", got)
+	}
+}

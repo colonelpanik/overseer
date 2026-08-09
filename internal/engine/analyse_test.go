@@ -590,3 +590,125 @@ func TestAnalysisRecordsItsProvider(t *testing.T) {
 		t.Errorf("Metered = %v, want 0 for a subscription-covered CLI run", got.Metered)
 	}
 }
+
+// A proposal in the shape the new prompt asks for: a one-line subject and a
+// goal that takes five sentences to say what it means.
+const subjectProposal = `{"tasks":[` +
+	`{"key":"cache","subject":"Cache the rack inventory query",` +
+	`"goal":"Add a cached projection of the rack inventory query. The view recomputes the whole join on every request, which is fine at the current row count and will not be at ten times it. Cache it in the store rather than in the handler.",` +
+	`"constraints":[],"verify":"go test ./...","blocking_severity":"any",` +
+	`"cost_cap":0,"depends_on":[],"rationale":"why","evidence":["a.go:1"]}]}`
+
+// The same task from a model that ignored the subject field.
+const noSubjectProposal = `{"tasks":[` +
+	`{"key":"cache",` +
+	`"goal":"Add a cached projection of the rack inventory query. The view recomputes the whole join on every request, which is fine at the current row count and will not be at ten times it.",` +
+	`"constraints":[],"verify":"go test ./...","blocking_severity":"any",` +
+	`"cost_cap":0,"depends_on":[],"rationale":"why","evidence":["a.go:1"]}]}`
+
+// readyProposal drives a harness whose fake analyst is already wired up
+// through to a reviewable task list.
+func readyProposal(t *testing.T, h *harness) store.Proposal {
+	t.Helper()
+	ctx := context.Background()
+	p, err := h.eng.StartProposal(ctx, h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.ConfigureProposal(ctx, p.ID, nil, "", 12, ""); err != nil {
+		t.Fatal(err)
+	}
+	done := waitForProposal(t, h, p.ID, store.ProposalReady, store.ProposalFailed)
+	if done.State != store.ProposalReady {
+		t.Fatalf("state = %s: %s", done.State, done.ErrMsg)
+	}
+	return done
+}
+
+func TestAnalyseStoresTheSubjectItWasGiven(t *testing.T) {
+	h := newHarness(t, fakeAnalyst(t, subjectProposal), "true")
+	p := readyProposal(t, h)
+	rows, err := h.st.ProposalTasks(context.Background(), p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want the model's subject", rows[0].Subject)
+	}
+	if !strings.Contains(rows[0].Goal, "recomputes the whole join") {
+		t.Errorf("Goal = %q, want the whole goal kept as the body", rows[0].Goal)
+	}
+}
+
+func TestAnalyseDerivesASubjectWhenTheModelOmitsOne(t *testing.T) {
+	h := newHarness(t, fakeAnalyst(t, noSubjectProposal), "true")
+	p := readyProposal(t, h)
+	rows, err := h.st.ProposalTasks(context.Background(), p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Add a cached projection of the rack inventory query"
+	if rows[0].Subject != want {
+		t.Errorf("Subject = %q, want %q derived from the goal", rows[0].Subject, want)
+	}
+}
+
+func TestQueueProposalCarriesTheSubjectAndSlugsFromIt(t *testing.T) {
+	h := newHarness(t, fakeAnalyst(t, subjectProposal), "true")
+	ctx := context.Background()
+	p := readyProposal(t, h)
+
+	created, err := h.eng.QueueProposal(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created[0].Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want the proposal's subject", created[0].Subject)
+	}
+	// An analysis row always carries a subject, so this is the supplied-subject
+	// branch of the slug rule: a readable branch name instead of sixty
+	// characters of a paragraph.
+	if created[0].Slug != "cache-the-rack-inventory-query" {
+		t.Errorf("Slug = %q, want the subject's slug", created[0].Slug)
+	}
+}
+
+func TestUnqueuedProposalsReachTheBacklogWithTheirSubject(t *testing.T) {
+	h := newHarness(t, fakeAnalyst(t, subjectProposal), "true")
+	ctx := context.Background()
+	p := readyProposal(t, h)
+	if err := h.eng.DiscardProposal(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := h.st.RepoByPath(ctx, h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := h.st.ListBacklog(ctx, repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want the unqueued task filed", len(items))
+	}
+	if items[0].Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want the proposal's subject", items[0].Subject)
+	}
+	// The instruction has to survive: promoting the item turns the title back
+	// into a task's goal.
+	if !strings.Contains(items[0].Title, "recomputes the whole join") {
+		t.Errorf("Title = %q, want the whole goal", items[0].Title)
+	}
+
+	task, err := h.eng.PromoteBacklogItem(ctx, items[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Subject != "Cache the rack inventory query" {
+		t.Errorf("Subject = %q, want the item's subject carried onto the task", task.Subject)
+	}
+	if !strings.Contains(task.Goal, "recomputes the whole join") {
+		t.Errorf("Goal = %q, want the whole instruction", task.Goal)
+	}
+}

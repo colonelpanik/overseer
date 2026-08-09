@@ -105,7 +105,7 @@ func TestVerifyFingerprintIsStableAcrossIdenticalFailures(t *testing.T) {
 func TestReviseWithFindingsIncludesDetail(t *testing.T) {
 	// Detail is excluded from the fingerprint but must still reach the agent.
 	p := ReviseWithFindingsPrompt("the code", VerifyFindings(
-		"make test", 1, "--- FAIL: TestX (0.1s)\n    x_test.go:3: boom"))
+		"make test", 1, "--- FAIL: TestX (0.1s)\n    x_test.go:3: boom"), nil)
 	if !strings.Contains(p, "boom") {
 		t.Errorf("the prompt omits the failure detail:\n%s", p)
 	}

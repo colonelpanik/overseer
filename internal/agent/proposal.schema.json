@@ -8,11 +8,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["key", "goal", "constraints", "verify", "blocking_severity", "cost_cap", "depends_on", "rationale", "evidence"],
+        "required": ["key", "subject", "goal", "constraints", "verify", "blocking_severity", "cost_cap", "depends_on", "rationale", "evidence"],
         "properties": {
           "key": {
             "type": "string",
             "description": "A short kebab-case name unique within this response. Other tasks refer to it in depends_on."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The one line this task is listed under: at most 72 characters, imperative, no trailing full stop. It must be recognisable on its own — 'Cache the rack inventory query', not 'Performance work' and not the first 72 characters of the goal."
           },
           "goal": {
             "type": "string",

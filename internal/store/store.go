@@ -78,6 +78,10 @@ var addedColumns = []struct{ table, column, decl string }{
 	{"proposals", "kind", "TEXT NOT NULL DEFAULT 'analyse'"},
 	{"proposals", "design", "TEXT NOT NULL DEFAULT ''"},
 	{"proposals", "architect_session", "TEXT NOT NULL DEFAULT ''"},
+	// The short form of a task, beside the goal it summarises.
+	{"tasks", "subject", "TEXT NOT NULL DEFAULT ''"},
+	{"proposal_tasks", "subject", "TEXT NOT NULL DEFAULT ''"},
+	{"backlog", "subject", "TEXT NOT NULL DEFAULT ''"},
 	// Which conversation a task list was pulled out of. A plain integer rather
 	// than a foreign key: SQLite's ALTER TABLE ADD COLUMN only accepts a
 	// REFERENCES clause when the default is NULL, which is why proposals.repo_id

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestPRTitleUsesFirstLineAndIsCapped(t *testing.T) {
@@ -218,5 +219,32 @@ func TestPRBodyHugeReviewAndGoalAlsoBounded(t *testing.T) {
 	}
 	if !strings.Contains(body, "Opened by overseer") {
 		t.Error("the footer was lost")
+	}
+}
+
+func TestPRTitleCountsRunesNotBytes(t *testing.T) {
+	// 68 ASCII characters and three multi-byte ones: 71 runes, 77 bytes. The
+	// subject that feeds this is bounded in runes, so a headline like this one
+	// arrives untouched and is inside the budget — but a byte cap fires on it
+	// and lands one byte into a three-byte character.
+	headline := strings.Repeat("x", 68) + "日本語"
+	got := PRTitle(headline)
+	if !utf8.ValidString(got) {
+		t.Errorf("PRTitle = %q, want valid UTF-8", got)
+	}
+	if got != headline {
+		t.Errorf("PRTitle = %q, want a 71-rune headline left alone", got)
+	}
+
+	// And a headline genuinely past the budget is still cut, still cleanly.
+	long := PRTitle(strings.Repeat("日", 200))
+	if !utf8.ValidString(long) {
+		t.Errorf("PRTitle = %q, want valid UTF-8", long)
+	}
+	if n := utf8.RuneCountInString(long); n > 72 {
+		t.Errorf("PRTitle = %q (%d runes), want at most 72", long, n)
+	}
+	if !strings.HasSuffix(long, "...") {
+		t.Errorf("PRTitle = %q, want an elision marker", long)
 	}
 }

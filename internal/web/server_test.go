@@ -4,11 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"overseer/internal/config"
 	"overseer/internal/engine"
@@ -20,13 +20,13 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
-	// These tests exercise handlers and rendering, never an agent. Left at the
-	// defaults they would find a real claude or codex on the developer's PATH
-	// and start a paid conversation in the background — which then races the
-	// test's own TempDir cleanup. Pointing at a binary that cannot exist makes
-	// every background turn fail immediately and identically everywhere.
-	cfg.ClaudeBin = filepath.Join(cfg.DataDir, "no-such-claude")
-	cfg.CodexBin = filepath.Join(cfg.DataDir, "no-such-codex")
+	// config.Default names the agents by bare binary, which PATH resolves to
+	// the operator's own Claude and Codex. A handler that starts a background
+	// turn would then run a real agent — slow, billable, and dependent on
+	// whatever is installed. These stubs exit immediately instead, so the turn
+	// fails fast and the handler under test is still the thing being tested.
+	cfg.ClaudeBin = stubAgent(t, "claude")
+	cfg.CodexBin = stubAgent(t, "codex")
 
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
@@ -40,31 +40,24 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Registered after DataDir's cleanup and so running before it: a design or
+	// an analysis outlives the request that started it, and a turn still
+	// writing under proposals/<id>/ while the temporary DataDir is being
+	// deleted is a race the deletion loses.
+	t.Cleanup(eng.Wait)
+
 	return New(cfg, st, eng, filepath.Join(cfg.DataDir, "config.yaml")), st
 }
 
-// waitForArchitectTurns blocks until a conversation has recorded at least n
-// turns.
-//
-// Starting a design replies in the background, and that goroutine writes into
-// the proposal's run directory under the daemon's data dir — which is
-// t.TempDir(). A test that returns while it is still running races its own
-// cleanup, and RemoveAll fails on a directory the goroutine is still filling.
-// Waiting for the turn it ends with is the synchronisation point.
-func waitForArchitectTurns(t *testing.T, st *store.Store, proposalID int64, n int) {
+// stubAgent is an agent binary that does nothing and succeeds, for the tests
+// whose handler starts a turn they do not care about the content of.
+func stubAgent(t *testing.T, name string) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		turns, err := st.ArchitectTurns(context.Background(), proposalID)
-		if err != nil {
-			t.Fatalf("ArchitectTurns: %v", err)
-		}
-		if len(turns) >= n {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("proposal %d never reached %d turns", proposalID, n)
+	return path
 }
 
 func get(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {

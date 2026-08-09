@@ -120,11 +120,16 @@ type Row struct {
 	State    string
 	Tone     string
 	Progress string
-	Goal     string
-	Repo     string
-	Meta     string
-	Bars     []Bar
-	Note     string
+	// Subject is the one line the row is listed under; Body is the whole goal,
+	// shown as the row's tooltip. Two fields rather than one because the row
+	// clamps to two lines: without the subject a wordy task is three sentences
+	// with the last one cut off mid-word, which is not a title.
+	Subject string
+	Body    string
+	Repo    string
+	Meta    string
+	Bars    []Bar
+	Note    string
 	// PR is the pull request URL as text, not a link: the whole row is one
 	// anchor, and an anchor inside an anchor is not a thing. The clickable
 	// version is the primary action in the detail header.
@@ -260,14 +265,17 @@ type PlanPane struct {
 
 // Detail is the selected task.
 type Detail struct {
-	ID           int64
-	Slug         string
-	State        string
-	Tone         string
-	Progress     string
-	Branch       string
-	Spend        string
-	Goal         string
+	ID       int64
+	Slug     string
+	State    string
+	Tone     string
+	Progress string
+	Branch   string
+	Spend    string
+	// Subject is the heading; Body is the whole goal beneath it, empty when
+	// the two would say the same thing.
+	Subject      string
+	Body         string
 	Chips        []Tag
 	Actions      []Action
 	Banner       *Banner
@@ -341,8 +349,12 @@ type FocusChoice struct {
 
 // ProposedRow is one proposed task on the review step.
 type ProposedRow struct {
-	ID   int64
-	Goal string
+	ID int64
+	// Subject is the headline, Body the goal shown beneath it, and Goal the
+	// raw text the edit form round-trips.
+	Subject string
+	Body    string
+	Goal    string
 	// Meta is the verify command, threshold and cap as one line, because on a
 	// list of twelve they are scanned rather than read.
 	Meta      string
@@ -657,6 +669,8 @@ func buildWizard(p store.Proposal, rows []store.ProposalTask, live *LivePane, q 
 		}
 		row := ProposedRow{
 			ID:        r.ID,
+			Subject:   r.Headline(),
+			Body:      bodyOf(r.Goal, r.Headline()),
 			Goal:      r.Goal,
 			Queued:    r.CreatedTaskID != 0,
 			Meta:      strings.Join(meta, " · "),
@@ -714,7 +728,8 @@ func buildRows(facts []taskFacts, q Query) []Row {
 			Selected: q.Sel == t.ID,
 			State:    state,
 			Tone:     TaskTone(t),
-			Goal:     t.Goal,
+			Subject:  t.Headline(),
+			Body:     bodyOf(t.Goal, t.Headline()),
 			Repo:     repoName(t.RepoPath) + " · " + branchName(t),
 			Bars:     bars(f.Rounds, 6, 4, 15),
 			Note:     rowNote(f),
@@ -861,7 +876,7 @@ func matches(t store.Task, search string) bool {
 		return true
 	}
 	hay := strings.ToLower(strings.Join([]string{
-		t.Goal, t.Slug, t.RepoPath, t.Branch, t.State,
+		t.Subject, t.Goal, t.Slug, t.RepoPath, t.Branch, t.State,
 	}, " "))
 	return strings.Contains(hay, strings.ToLower(search))
 }
@@ -892,7 +907,8 @@ func buildDetail(f taskFacts, steps []store.Step, byStep map[int64][]store.Findi
 		Tone:     TaskTone(t),
 		Progress: "not started",
 		Branch:   branchName(t),
-		Goal:     t.Goal,
+		Subject:  t.Headline(),
+		Body:     bodyOf(t.Goal, t.Headline()),
 	}
 	if t.Phase != "" {
 		d.Progress = Progress(t)
@@ -1371,6 +1387,31 @@ func repoName(path string) string {
 		return "—"
 	}
 	return filepath.Base(strings.TrimRight(path, "/"))
+}
+
+// bodyOf is the long text shown beneath a headline, or "" when the two would
+// say the same thing.
+//
+// The comparison is between normalised forms, not raw ones, and that is the
+// whole substance of this function. A headline derived from "Do the thing." is
+// "Do the thing" — Subject drops the full stop, because a title does not carry
+// one — so comparing the raw goal would find the two different and render the
+// same sentence twice, as the heading and again underneath it. That is the
+// common case rather than an edge one: most goals written by hand are a single
+// sentence, and it would look like a bug on almost every task an operator
+// queues themselves.
+//
+// It stays this permissive on purpose: anything the headline does not already
+// say is shown. A five-sentence goal whose first sentence became the headline
+// still renders in full, because the other four sentences are the reason the
+// body exists.
+func bodyOf(text, headline string) string {
+	trimmed := strings.TrimSpace(text)
+	oneLine := strings.Join(strings.Fields(trimmed), " ")
+	if strings.TrimSuffix(oneLine, ".") == strings.TrimSuffix(headline, ".") {
+		return ""
+	}
+	return trimmed
 }
 
 func branchName(t store.Task) string {

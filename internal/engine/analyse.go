@@ -83,7 +83,8 @@ func (e *Engine) ImportProposal(ctx context.Context, url string) (store.Proposal
 	}
 	e.notifyProposal()
 
-	go e.clone(context.WithoutCancel(ctx), p.ID, url)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.clone(bg, p.ID, url) })
 	return p, nil
 }
 
@@ -146,7 +147,8 @@ func (e *Engine) ConfigureProposal(ctx context.Context, proposalID int64,
 	}
 	e.notifyProposal()
 
-	go e.analyse(context.WithoutCancel(ctx), p.ID, "")
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.analyse(bg, p.ID, "") })
 	return nil
 }
 
@@ -175,7 +177,8 @@ func (e *Engine) RegenerateProposal(ctx context.Context, proposalID int64, feedb
 	}
 	e.notifyProposal()
 
-	go e.analyse(context.WithoutCancel(ctx), p.ID, feedback)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.analyse(bg, p.ID, feedback) })
 	return nil
 }
 
@@ -208,8 +211,14 @@ func (e *Engine) analyse(ctx context.Context, proposalID int64, feedback string)
 	rows := make([]store.ProposalTask, 0, len(tasks))
 	for i, t := range tasks {
 		rows = append(rows, store.ProposalTask{
-			Ord:         i,
-			Key:         strings.TrimSpace(t.KeyOrEmpty()),
+			Ord: i,
+			Key: strings.TrimSpace(t.KeyOrEmpty()),
+			// The model's subject, tidied, or one derived from the goal when it
+			// did not write one — SubjectOr is that choice, made in one place so
+			// no caller has to remember which of the two tidies and which
+			// guesses. A model that answered with a paragraph in the subject
+			// field cannot defeat the point of it either way.
+			Subject:     store.SubjectOr(t.SubjectOrEmpty(), t.GoalOrEmpty()),
 			Goal:        strings.TrimSpace(t.GoalOrEmpty()),
 			Constraints: t.Constraints,
 			Verify:      strings.TrimSpace(t.VerifyOrEmpty()),
@@ -392,6 +401,7 @@ func (e *Engine) QueueProposal(ctx context.Context, proposalID int64) ([]store.T
 	for _, r := range selected {
 		task, err := e.Submit(ctx, BatchTask{
 			Repo:             p.RepoPath,
+			Subject:          r.Subject,
 			Goal:             r.Goal,
 			Constraints:      r.Constraints,
 			BlockingSeverity: r.Severity,

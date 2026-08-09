@@ -38,6 +38,7 @@ Usage:
   overseer repos                 list repositories, what they cost, and their backlogs
   overseer backlog [repo]        list what is worth doing, per repository
   overseer new <path>            create a project and design it with an architect
+                                 (waits for the architect's first reply)
   overseer stop <task-id>        park a task where it is (-now kills the agent)
   overseer start <task-id>       put a stopped task back to work
   overseer restart <task-id>     run a task again, on a fresh branch
@@ -84,7 +85,11 @@ func run(args []string) error {
 	case "backlog":
 		return cmdBacklog(cfg, fs.Arg(0))
 	case "new":
-		return cmdNew(cfg, fs.Arg(0), *brief)
+		// The one non-daemon command that runs an agent, and therefore the one
+		// that has something to cancel. See interruptible.
+		ctx, stop := interruptible()
+		defer stop()
+		return cmdNew(ctx, cfg, fs.Arg(0), *brief)
 	case "stop":
 		return cmdStop(cfg, fs.Arg(0), *now)
 	case "start":
@@ -115,6 +120,26 @@ func open(cfg config.Config) (*store.Store, *engine.Engine, error) {
 		return nil, nil, err
 	}
 	return st, eng, nil
+}
+
+// interruptible returns a context cancelled by the first SIGINT or SIGTERM,
+// and the function that takes the handler back off.
+//
+// Every command that starts an agent needs one. agent.Runner puts the agent in
+// a process group of its own (see internal/agent/runner.go), precisely so a kill
+// takes its children with it — which also means the terminal's Ctrl-C is
+// delivered to overseer alone and never to the agent. With context.Background()
+// the process would exit while the agent carried on running, having recorded
+// neither a reply nor a failure. Cancelling this context is what kills the
+// agent's group, gets the outcome written down, and leaves the deferred store
+// cleanup a chance to run.
+//
+// A second Ctrl-C does nothing: NotifyContext cancels once and keeps the
+// handler until stop(). That is deliberate and long-standing here — the kill is
+// a SIGKILL to the group, so what is left after the first is one wait and two
+// inserts.
+func interruptible() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 // shutdownGrace bounds how long cmdServe waits for the web server and the
@@ -151,7 +176,7 @@ func cmdServe(cfg config.Config, configPath string) error {
 	}
 	defer st.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := interruptible()
 	defer stop()
 
 	if err := eng.Recover(ctx); err != nil {

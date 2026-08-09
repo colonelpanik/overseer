@@ -530,3 +530,38 @@ func TestAFailedChatPullCannotBeRegeneratedAsAnAnalysis(t *testing.T) {
 		t.Error("regenerating a chat pull should be refused")
 	}
 }
+
+func TestAPulledActionCarriesASubjectLikeEveryOtherProposedTask(t *testing.T) {
+	// The board lists a task by its subject and falls back to deriving one from
+	// the goal. A pull that left the column empty would make the one path that
+	// produces tasks from a conversation the only one whose rows never carry
+	// the model's own one-line summary.
+	tasks := `{"tasks":[{"key":"in-flight","subject":"Add an in_flight column",` +
+		`"goal":"Add an explicit in_flight boolean column to architect_turns and read it in architectBusy.",` +
+		`"constraints":[],"verify":"go test ./...","blocking_severity":"any","cost_cap":null,` +
+		`"depends_on":[],"rationale":"agreed","evidence":["architect.go:106"]}]}`
+	h := newHarness(t, fakePull(t, tasks), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerAssistant, Body: "agreed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := h.eng.PullActions(ctx, chat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProposalState(t, h, p.ID, store.ProposalReady)
+	rows, err := h.st.ProposalTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if rows[0].Subject != "Add an in_flight column" {
+		t.Errorf("Subject = %q, want the one the model wrote", rows[0].Subject)
+	}
+}

@@ -249,6 +249,61 @@ func TestAllReviewRoundsKeepsCleanRoundsInTheSeries(t *testing.T) {
 	}
 }
 
+func TestBlockingSummaryCountsTallyRecurrenceAcrossRounds(t *testing.T) {
+	st := depStore(t)
+	ctx := context.Background()
+	task := mkTask(t, st, "t", "executing")
+	other := mkTask(t, st, "other", "executing")
+
+	// "first" is raised three times, "second" once, and a non-blocking finding
+	// never counts — the prompt marks what held the loop up, not what a
+	// reviewer mentioned in passing.
+	for i, findings := range [][]Finding{
+		{{Severity: "major", Summary: "first", Blocking: true},
+			{Severity: "nit", Summary: "cosmetic", Blocking: false}},
+		{{Severity: "major", Summary: "first", Blocking: true},
+			{Severity: "major", Summary: "second", Blocking: true}},
+		{{Severity: "major", Summary: "first", Blocking: true}},
+	} {
+		step, err := st.StartStep(ctx, Step{
+			TaskID: task.ID, Phase: "exec", Iteration: i + 1, Agent: "codex",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		step.Verdict = "changes_requested"
+		if err := st.FinishStep(ctx, step, findings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Another task's identical finding must not inflate this one's count, or
+	// every task would look like it was oscillating on a common objection.
+	step, err := st.StartStep(ctx, Step{TaskID: other.ID, Phase: "exec", Iteration: 1, Agent: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.Verdict = "changes_requested"
+	if err := st.FinishStep(ctx, step, []Finding{
+		{Severity: "major", Summary: "first", Blocking: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.BlockingSummaryCounts(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["first"] != 3 {
+		t.Errorf(`counts["first"] = %d, want 3`, got["first"])
+	}
+	if got["second"] != 1 {
+		t.Errorf(`counts["second"] = %d, want 1`, got["second"])
+	}
+	if _, ok := got["cosmetic"]; ok {
+		t.Errorf("a non-blocking finding was counted: %v", got)
+	}
+}
+
 func TestAllReviewRoundsSeparatesTasks(t *testing.T) {
 	st := depStore(t)
 	ctx := context.Background()

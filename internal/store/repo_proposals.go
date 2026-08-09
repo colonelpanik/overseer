@@ -94,7 +94,11 @@ type ProposalTask struct {
 	// Key is the model's local name for this task. DependsOn refers to these,
 	// not to slugs: the real slug is not known until Submit creates the task,
 	// and it may pick up a collision suffix.
-	Key         string
+	Key string
+	// Subject is the one line this task will be listed under, and Goal is the
+	// whole instruction. Both come from the same response; an operator may fix
+	// either on the review step.
+	Subject     string
 	Goal        string
 	Constraints []string
 	Verify      string
@@ -335,7 +339,7 @@ func (s *Store) FailStrandedProposals(ctx context.Context, reason string) (int, 
 	return int(n), nil
 }
 
-const proposalTaskColumns = `id, proposal_id, ord, key, goal, constraints,
+const proposalTaskColumns = `id, proposal_id, ord, key, subject, goal, constraints,
 	verify, severity, cost_cap, depends_on, rationale, evidence, selected,
 	created_task_id`
 
@@ -359,11 +363,11 @@ func (s *Store) ReplaceProposalTasks(ctx context.Context, proposalID int64, task
 			selected = 1
 		}
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO proposal_tasks (proposal_id, ord, key, goal, constraints,
+			INSERT INTO proposal_tasks (proposal_id, ord, key, subject, goal, constraints,
 				verify, severity, cost_cap, depends_on, rationale, evidence,
 				selected, created_task_id)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			proposalID, i, t.Key, t.Goal, strings.Join(t.Constraints, "\n"),
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			proposalID, i, t.Key, t.Subject, t.Goal, strings.Join(t.Constraints, "\n"),
 			t.Verify, t.Severity, t.CostCap, strings.Join(t.DependsOn, "\n"),
 			t.Rationale, strings.Join(t.Evidence, "\n"), selected, t.CreatedTaskID)
 		if err != nil {
@@ -390,7 +394,7 @@ func (s *Store) ProposalTasks(ctx context.Context, proposalID int64) ([]Proposal
 		var t ProposalTask
 		var constraints, dependsOn, evidence string
 		var selected int
-		if err := rows.Scan(&t.ID, &t.ProposalID, &t.Ord, &t.Key, &t.Goal,
+		if err := rows.Scan(&t.ID, &t.ProposalID, &t.Ord, &t.Key, &t.Subject, &t.Goal,
 			&constraints, &t.Verify, &t.Severity, &t.CostCap, &dependsOn,
 			&t.Rationale, &evidence, &selected, &t.CreatedTaskID); err != nil {
 			return nil, fmt.Errorf("scan proposal task: %w", err)
@@ -428,10 +432,10 @@ func (s *Store) SaveProposalTask(ctx context.Context, t ProposalTask) error {
 		selected = 1
 	}
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE proposal_tasks SET goal=?, constraints=?, verify=?, severity=?,
+		UPDATE proposal_tasks SET subject=?, goal=?, constraints=?, verify=?, severity=?,
 			cost_cap=?, selected=?, created_task_id=?
 		WHERE id=? AND proposal_id=?`,
-		t.Goal, strings.Join(t.Constraints, "\n"), t.Verify, t.Severity,
+		t.Subject, t.Goal, strings.Join(t.Constraints, "\n"), t.Verify, t.Severity,
 		t.CostCap, selected, t.CreatedTaskID, t.ID, t.ProposalID)
 	if err != nil {
 		return fmt.Errorf("update proposal task: %w", err)

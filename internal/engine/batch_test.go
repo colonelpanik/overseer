@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"overseer/internal/loop"
+	"overseer/internal/worktree"
 )
 
 func TestParseBatch(t *testing.T) {
@@ -200,5 +201,140 @@ func TestAbandonStillWorksOnAnIdleTask(t *testing.T) {
 	// signal mean two different things.
 	if got.State != string(loop.StateAbandoned) {
 		t.Errorf("State = %q, want abandoned", got.State)
+	}
+}
+
+func TestSubmitDerivesASubjectFromAWordyGoal(t *testing.T) {
+	// A task file and the dashboard's form never see a model. The task still
+	// needs a title, and the branch name still needs to be readable.
+	h := newHarness(t, "true", "true")
+	task, err := h.eng.Submit(context.Background(), BatchTask{
+		Repo: h.repo,
+		Goal: "Add a cached projection of the rack inventory query. The view " +
+			"recomputes the whole join on every request, which will not hold.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Subject != "Add a cached projection of the rack inventory query" {
+		t.Errorf("Subject = %q, want the goal's first sentence", task.Subject)
+	}
+	// The slug is NOT derived from the subject here. Nobody supplied one, so it
+	// stays exactly what it has always been — see the batch test below for why
+	// that matters.
+	if task.Slug != worktree.Slugify(task.Goal) {
+		t.Errorf("Slug = %q, want the goal-derived slug %q",
+			task.Slug, worktree.Slugify(task.Goal))
+	}
+}
+
+func TestABatchFileWithALongGoalKeepsTheSlugItsDependsOnNames(t *testing.T) {
+	// The compatibility guarantee for every task file already written. A slug
+	// is what a depends_on refers to, it has always been derived from the goal,
+	// and the README says so — so a task that gives no subject must get the
+	// same slug it got before subjects existed, or the dependency in somebody's
+	// file stops resolving.
+	h := newHarness(t, "true", "true")
+	long := "Add a cached projection of the rack inventory query. The view " +
+		"recomputes the whole join on every request, which will not hold."
+
+	created, err := h.eng.SubmitBatch(context.Background(), Batch{Tasks: []BatchTask{
+		{Repo: h.repo, Goal: long},
+		{Repo: h.repo, Goal: "Add a column picker.",
+			DependsOn: []string{worktree.Slugify(long)}},
+	}})
+	if err != nil {
+		t.Fatalf("SubmitBatch: %v", err)
+	}
+	if created[0].Slug != worktree.Slugify(long) {
+		t.Errorf("Slug = %q, want the goal-derived slug %q an existing file names",
+			created[0].Slug, worktree.Slugify(long))
+	}
+	deps, err := h.st.TaskDeps(context.Background(), created[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 1 || deps[0] != created[0].ID {
+		t.Errorf("deps = %v, want [%d] — the depends_on no longer resolves",
+			deps, created[0].ID)
+	}
+}
+
+func TestSubmitPrefersASubjectItWasGiven(t *testing.T) {
+	h := newHarness(t, "true", "true")
+	task, err := h.eng.Submit(context.Background(), BatchTask{
+		Repo:    h.repo,
+		Subject: "Cache the inventory join",
+		Goal:    "Add a cached projection of the rack inventory query. And more.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Subject != "Cache the inventory join" {
+		t.Errorf("Subject = %q, want the submitted subject", task.Subject)
+	}
+	// A supplied subject does drive the slug: nothing can already refer to this
+	// task by name, and a branch called overseer/cache-the-inventory-join beats
+	// sixty characters of a paragraph.
+	if task.Slug != "cache-the-inventory-join" {
+		t.Errorf("Slug = %q, want the submitted subject's slug", task.Slug)
+	}
+}
+
+func TestSubmitSlugsFromTheTidiedSubjectNotTheRawOne(t *testing.T) {
+	// A subject that arrives needing repair — a newline and a second sentence.
+	// The board shows the repaired line, so the branch has to be built from the
+	// same string, or the two disagree about what this task is called.
+	h := newHarness(t, "true", "true")
+	task, err := h.eng.Submit(context.Background(), BatchTask{
+		Repo:    h.repo,
+		Subject: "Cache the inventory join.\nAlso add a test.",
+		Goal:    "Add a cached projection of the rack inventory query.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Subject != "Cache the inventory join. Also add a test" {
+		t.Errorf("Subject = %q, want the tidied subject", task.Subject)
+	}
+	if task.Slug != worktree.Slugify(task.Subject) {
+		t.Errorf("Slug = %q, want %q — the slug and the subject must agree",
+			task.Slug, worktree.Slugify(task.Subject))
+	}
+}
+
+func TestParseBatchReadsASubject(t *testing.T) {
+	b, err := ParseBatch([]byte("tasks:\n  - repo: /tmp/r\n    subject: Cache the join\n    goal: Do the long thing.\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Tasks[0].Subject != "Cache the join" {
+		t.Errorf("Subject = %q, want the file's subject", b.Tasks[0].Subject)
+	}
+}
+
+func TestRestartWithANewGoalRederivesTheSubject(t *testing.T) {
+	// "Restart it, but this time..." replaces the goal. A subject describing
+	// the goal it no longer has would leave the board naming work nobody asked
+	// for.
+	h := newHarness(t, "true", "true")
+	ctx := context.Background()
+	task, err := h.eng.Submit(ctx, BatchTask{
+		Repo: h.repo, Subject: "The old subject", Goal: "The old goal.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.Restart(ctx, task.ID, RestartOpts{
+		Goal: "Rewrite the rack inventory projection instead. Leave the schema alone.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Subject != "Rewrite the rack inventory projection instead" {
+		t.Errorf("Subject = %q, want it re-derived from the new goal", got.Subject)
 	}
 }

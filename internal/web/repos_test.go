@@ -594,3 +594,35 @@ func TestAnalyseAcceptsASlugFromTheDropdownAndAPathFromTheField(t *testing.T) {
 		t.Errorf("empty submit = %d, want 400", rec.Code)
 	}
 }
+
+func TestTheBacklogRowLeadsWithTheSubject(t *testing.T) {
+	s, st := newTestServer(t)
+	ctx := context.Background()
+	const title = "Add a cached projection of the rack inventory query. " +
+		"It recomputes the whole join per request."
+
+	repo, err := st.UpsertRepo(ctx, store.Repo{Path: "/src/widget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddBacklogItem(ctx, store.BacklogItem{
+		RepoID: repo.ID, Source: store.BacklogAnalysis,
+		Subject: "Cache the rack inventory query", Title: title,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	body := get(t, s, "/?overlay=backlog").Body.String()
+	want := `<span class="goal">Cache the rack inventory query</span>`
+	if !strings.Contains(body, want) {
+		t.Errorf("the backlog row does not lead with the subject; want %s", want)
+	}
+	if strings.Contains(body, `<span class="goal">Add a cached projection`) {
+		t.Error("the backlog row is still rendering the whole title as its headline")
+	}
+	// The full text stays on the row: promoting the item turns it back into a
+	// task's goal, and an operator should be able to read what they are queueing.
+	if !strings.Contains(body, title) {
+		t.Error("the backlog row drops the full text")
+	}
+}

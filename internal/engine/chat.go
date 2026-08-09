@@ -89,7 +89,8 @@ func (e *Engine) Ask(ctx context.Context, chatID int64, message string) error {
 	}
 	e.notifyChat()
 
-	go e.chatTurn(context.WithoutCancel(ctx), chatID, message)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.chatTurn(bg, chatID, message) })
 	return nil
 }
 
@@ -172,11 +173,16 @@ func (e *Engine) chatTurn(ctx context.Context, chatID int64, message string) {
 	}
 
 	res, err := e.runChat(ctx, &chat, repo, e.chatPrompt(ctx, chat, repo, message, false))
-	// A resume that fails is recoverable, and must be: the architect only
-	// tolerates a missing session on its opening turn, so a session lost at
-	// turn twenty makes every turn after it fail identically for ever. The
-	// database holds every turn verbatim precisely so this can start again.
-	if chat.Session != "" && (err != nil || res.ErrMsg != "") {
+	// A resume that fails is recoverable, and must be: a session lost at turn
+	// twenty would otherwise make every turn after it fail identically for
+	// ever. The database holds every turn verbatim precisely so this can start
+	// again.
+	//
+	// Not attempted when the operator interrupted this one. A cancelled turn is
+	// not a lost session, and starting a second agent after a Ctrl-C would
+	// spend money on a reply nobody is waiting for.
+	if chat.Session != "" && (err != nil || res.ErrMsg != "") &&
+		!res.Canceled && ctx.Err() == nil {
 		chat.Session = ""
 		if saveErr := e.Store.SaveChat(ctx, chat); saveErr == nil {
 			res, err = e.runChat(ctx, &chat, repo,
@@ -186,6 +192,13 @@ func (e *Engine) chatTurn(ctx context.Context, chatID int64, message string) {
 
 	if err != nil {
 		e.recordChatFailure(ctx, chatID, err.Error())
+		return
+	}
+	// Before ErrMsg, which by now holds whatever the agent printed as it was
+	// killed: asking IsAuthFailure about that could pause the whole run on the
+	// strength of a dying agent's last words.
+	if res.Canceled {
+		e.recordChatFailure(ctx, chatID, interruptedMsg)
 		return
 	}
 	if res.ErrMsg != "" {
@@ -201,7 +214,11 @@ func (e *Engine) chatTurn(ctx context.Context, chatID int64, message string) {
 		e.recordChatFailure(ctx, chatID, "the chat replied with nothing")
 		return
 	}
-	if _, err := e.Store.AddChatTurn(ctx, store.ChatTurn{
+	// Detached: a SIGINT landing between a good reply and this insert would
+	// otherwise throw away a turn that happened and was paid for, and leave the
+	// operator as the last speaker — which chatBusy reads as "a reply is still
+	// coming", so Ask refuses and the conversation can never be continued.
+	if _, err := e.Store.AddChatTurn(context.WithoutCancel(ctx), store.ChatTurn{
 		ChatID: chatID, Speaker: store.SpeakerAssistant, Body: body,
 		CostUSD: res.CostUSD, InputTokens: res.InputTokens,
 		OutputTokens: res.OutputTokens, Provider: e.chatProvider(),
@@ -235,7 +252,16 @@ func (e *Engine) chatPrompt(ctx context.Context, chat store.Chat, repo store.Rep
 }
 
 func (e *Engine) recordChatFailure(ctx context.Context, chatID int64, msg string) {
-	if _, err := e.Store.AddChatTurn(ctx, store.ChatTurn{
+	// ctx is asked rather than the message inspected: every failure path in
+	// chatTurn arrives here, and a cancelled context is the one thing that
+	// explains all of them.
+	if ctx.Err() != nil {
+		msg = interruptedMsg
+	}
+	// Detached for the same reason the reply is: not recording the failure is
+	// what leaves the conversation with the operator as its last speaker, and
+	// so unusable for ever.
+	if _, err := e.Store.AddChatTurn(context.WithoutCancel(ctx), store.ChatTurn{
 		ChatID: chatID, Speaker: store.SpeakerAssistant,
 		Body:   "I could not reply: " + msg,
 		ErrMsg: msg,
@@ -395,7 +421,8 @@ func (e *Engine) PullActions(ctx context.Context, chatID int64) (store.Proposal,
 	}
 	e.notifyProposal()
 
-	go e.pullActions(context.WithoutCancel(ctx), chatID, p.ID)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.pullActions(bg, chatID, p.ID) })
 	return p, nil
 }
 
@@ -440,8 +467,13 @@ func (e *Engine) pullActions(ctx context.Context, chatID, proposalID int64) {
 	rows := make([]store.ProposalTask, 0, len(tasks))
 	for i, t := range tasks {
 		rows = append(rows, store.ProposalTask{
-			Ord:         i,
-			Key:         strings.TrimSpace(t.KeyOrEmpty()),
+			Ord: i,
+			Key: strings.TrimSpace(t.KeyOrEmpty()),
+			// The model's own one line, tidied, or one derived from the goal
+			// when it did not write one — the same choice an analysis makes, in
+			// the same place, so a task reads the same on the board whichever
+			// produced it.
+			Subject:     store.SubjectOr(t.SubjectOrEmpty(), t.GoalOrEmpty()),
 			Goal:        strings.TrimSpace(t.GoalOrEmpty()),
 			Constraints: t.Constraints,
 			Verify:      strings.TrimSpace(t.VerifyOrEmpty()),
@@ -555,6 +587,13 @@ func (e *Engine) runPull(ctx context.Context, p *store.Proposal, prompt string) 
 			}
 		}
 
+		// Before ErrMsg, which by now holds whatever the agent printed as it was
+		// killed: asking IsAuthFailure about that could pause the whole run on
+		// the strength of a dying agent's last words. A stopped pull is also not
+		// worth re-asking, which the return here is what prevents.
+		if res.Canceled {
+			return nil, spent, errors.New(interruptedMsg)
+		}
 		if res.ErrMsg != "" {
 			if agent.IsAuthFailure(res.ErrMsg) {
 				e.Pause(fmt.Sprintf("the chat is not authenticated: %s", res.ErrMsg))
