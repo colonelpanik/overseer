@@ -271,3 +271,262 @@ func TestTheChatCannotWriteToTheRepository(t *testing.T) {
 		}
 	}
 }
+
+// fakePull answers with a task list. It fails if it is ever given --resume:
+// the pull must run in its own session, or its "reply with JSON and nothing
+// else" instruction would sit in the conversation's context for ever.
+func fakePull(t *testing.T, tasksJSON string) string {
+	t.Helper()
+	escaped := strings.ReplaceAll(tasksJSON, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return writeScript(t, "claude", `
+for arg in "$@"; do
+  if [ "$arg" = "--resume" ]; then
+    printf '%s\n' 'the pull must not resume the conversation' >&2
+    exit 1
+  fi
+done
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"pull-sess"}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"`+escaped+`"}]},"session_id":"pull-sess"}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"session_id":"pull-sess","total_cost_usd":0.15,"usage":{"input_tokens":80,"output_tokens":30}}'
+`)
+}
+
+func oneActionJSON(key, goal string) string {
+	return `{"tasks":[{"key":"` + key + `","goal":"` + goal + `","constraints":[],` +
+		`"verify":"go test ./...","blocking_severity":"any","cost_cap":null,` +
+		`"depends_on":[],"rationale":"agreed in the conversation","evidence":["chat.go:1"]}]}`
+}
+
+func waitForProposalState(t *testing.T, h *harness, id int64, want string) store.Proposal {
+	t.Helper()
+	var p store.Proposal
+	waitFor(t, "the pull to reach "+want, func() bool {
+		var err error
+		p, err = h.st.GetProposal(context.Background(), id)
+		return err == nil && p.State == want
+	})
+	return p
+}
+
+// The headline behaviour: a pull produces a reviewable list and the
+// conversation carries on.
+func TestPullCreatesAReviewableProposalAndLeavesTheChatAlive(t *testing.T) {
+	h := newHarness(t, fakePull(t, oneActionJSON("in-flight", "Add an explicit in-flight column")), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerOperator, Body: "let us add an in-flight column",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerAssistant, Body: "agreed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := h.eng.PullActions(ctx, chat.ID)
+	if err != nil {
+		t.Fatalf("PullActions: %v", err)
+	}
+	if p.Kind != store.ProposalChat {
+		t.Errorf("Kind = %q, want %q", p.Kind, store.ProposalChat)
+	}
+	if p.ChatID != chat.ID {
+		t.Errorf("ChatID = %d, want %d", p.ChatID, chat.ID)
+	}
+	// Created up front and in analysing, so the existing stranded-proposal
+	// sweep covers a restart mid-pull with no new code.
+	if p.State != store.ProposalAnalysing {
+		t.Errorf("State = %q, want analysing at the moment of the request", p.State)
+	}
+
+	waitForProposalState(t, h, p.ID, store.ProposalReady)
+	rows, err := h.st.ProposalTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || !strings.Contains(rows[0].Goal, "in-flight column") {
+		t.Fatalf("rows = %+v, want the agreed action", rows)
+	}
+
+	// And the conversation is untouched and still usable.
+	got, err := h.st.GetChat(ctx, chat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Archived() {
+		t.Error("pulling must not end the conversation")
+	}
+	turns, err := h.st.ChatTurns(ctx, chat.ID, 0)
+	if err != nil || len(turns) != 2 {
+		t.Errorf("turns = %d (err %v), want the conversation unchanged", len(turns), err)
+	}
+}
+
+func TestAPullThatFindsNothingLeavesNoEmptyReviewList(t *testing.T) {
+	// A conversation that has not decided anything yet has nothing to pull,
+	// and that is a normal early state rather than a failure. An empty review
+	// list sitting in the wizard would be noise the operator has to dismiss.
+	h := newHarness(t, fakePull(t, `{"tasks":[]}`), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerOperator, Body: "just wondering how this works",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerAssistant, Body: "understood",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := h.eng.PullActions(ctx, chat.ID)
+	if err != nil {
+		t.Fatalf("PullActions: %v", err)
+	}
+	done := waitForProposalState(t, h, p.ID, store.ProposalDiscarded)
+	if done.ErrMsg == "" {
+		t.Error("a pull that found nothing should say so")
+	}
+	rows, err := h.st.ProposalTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("rows = %d, want none", len(rows))
+	}
+}
+
+func TestPullingTwiceDoesNotReproposeWhatWasAlreadyFiled(t *testing.T) {
+	// The same conversation pulled again will describe the same decisions.
+	// Without a deterministic drop the operator reviews a list of work they
+	// already queued, which is the fastest way to make them stop using this.
+	h := newHarness(t, fakePull(t, oneActionJSON("in-flight", "Add an explicit in-flight column")), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerOperator, Body: "add an in-flight column",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerAssistant, Body: "understood",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := h.eng.PullActions(ctx, chat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProposalState(t, h, first.ID, store.ProposalReady)
+
+	second, err := h.eng.PullActions(ctx, chat.ID)
+	if err != nil {
+		t.Fatalf("a second pull should be allowed: %v", err)
+	}
+	done := waitForProposalState(t, h, second.ID, store.ProposalDiscarded)
+	if done.ErrMsg == "" {
+		t.Error("the second pull should say it found nothing new")
+	}
+}
+
+func TestPullRefusesWhileAnotherPullIsRunning(t *testing.T) {
+	// Two pulls of one conversation would both spend money producing the same
+	// list, and the operator would review it twice.
+	h := newHarness(t, blockingClaude(t), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerAssistant, Body: "agreed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.eng.PullActions(ctx, chat.ID); err != nil {
+		t.Fatalf("PullActions: %v", err)
+	}
+	if _, err := h.eng.PullActions(ctx, chat.ID); err == nil {
+		t.Error("a second pull should be refused while the first is running")
+	}
+}
+
+func TestPullRefusesWhileAReplyIsStillComing(t *testing.T) {
+	// Extracting from a half-finished exchange records decisions from a
+	// conversation that has not happened yet.
+	h := newHarness(t, blockingClaude(t), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+	if err := h.eng.Ask(ctx, chat.ID, "what about X?"); err != nil {
+		t.Fatal(err)
+	}
+	waitForChatTurns(t, h, chat.ID, 1)
+	if _, err := h.eng.PullActions(ctx, chat.ID); err == nil {
+		t.Error("a pull should be refused while a reply is in flight")
+	}
+}
+
+// The whole premise, end to end: talk, pull, queue real tasks, keep talking,
+// pull again without being shown the same work twice.
+func TestQueueingAPullMakesRealTasksAndTheChatCarriesOn(t *testing.T) {
+	h := newHarness(t, fakePull(t, oneActionJSON("in-flight", "Add an explicit in-flight column")), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerOperator, Body: "add an in-flight column",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerAssistant, Body: "understood",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := h.eng.PullActions(ctx, chat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProposalState(t, h, p.ID, store.ProposalReady)
+
+	tasks, err := h.eng.QueueProposal(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("QueueProposal: %v", err)
+	}
+	if len(tasks) != 1 || !strings.Contains(tasks[0].Goal, "in-flight column") {
+		t.Fatalf("tasks = %+v, want one real task", tasks)
+	}
+
+	// The conversation is still there, still live, and still accepts a turn.
+	if _, err := h.st.LiveChat(ctx, chat.RepoID); err != nil {
+		t.Errorf("the conversation should still be live after queueing: %v", err)
+	}
+	if _, err := h.st.AddChatTurn(ctx, store.ChatTurn{
+		ChatID: chat.ID, Speaker: store.SpeakerOperator, Body: "what about the reload guard?",
+	}); err != nil {
+		t.Errorf("the conversation should still accept turns: %v", err)
+	}
+}
+
+func TestAFailedChatPullCannotBeRegeneratedAsAnAnalysis(t *testing.T) {
+	// RegenerateProposal accepts ready or failed and runs the analysis prompt.
+	// Offered on a chat pull it would quietly start a full repository analysis
+	// — different work, different cost, and not what the button says.
+	h := newHarness(t, fakeChat(t, "hello"), "true")
+	ctx := context.Background()
+	chat := openChat(t, h)
+
+	p, err := h.st.CreateProposal(ctx, store.Proposal{
+		Kind: store.ProposalChat, State: store.ProposalFailed,
+		ChatID: chat.ID, RepoID: chat.RepoID, RepoPath: h.repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.eng.RegenerateProposal(ctx, p.ID, ""); err == nil {
+		t.Error("regenerating a chat pull should be refused")
+	}
+}

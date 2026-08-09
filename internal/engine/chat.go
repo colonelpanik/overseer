@@ -368,3 +368,270 @@ func dirExists(path string) error {
 // have no task ID, and the SSE client reloads on any event whatever its
 // payload, so zero means "something that is not a task".
 func (e *Engine) notifyChat() { e.notify(0) }
+
+// PullActions turns what the conversation decided into a reviewable task list.
+//
+// The proposal is created up front, in analysing, rather than after the agent
+// answers. That buys three things with no new code: the existing stranded
+// sweep parks it if the daemon restarts mid-pull, failProposal records what a
+// failed attempt cost, and "is a pull already running" becomes a fact in the
+// database rather than a lock that dies with the process.
+//
+// The conversation is untouched. Pulling is not the end of it.
+func (e *Engine) PullActions(ctx context.Context, chatID int64) (store.Proposal, error) {
+	chat, err := e.Store.GetChat(ctx, chatID)
+	if err != nil {
+		return store.Proposal{}, err
+	}
+	repo, err := e.Store.GetRepo(ctx, chat.RepoID)
+	if err != nil {
+		return store.Proposal{}, err
+	}
+	if repo.Archived() {
+		return store.Proposal{}, fmt.Errorf("repository %s is archived", repo.Slug)
+	}
+	// Extracting from a half-finished exchange would record decisions from a
+	// conversation that has not happened yet.
+	if e.chatBusy(ctx, chatID) {
+		return store.Proposal{}, errors.New("still answering the last question")
+	}
+	busy, err := e.Store.ChatPullInFlight(ctx, chatID)
+	if err != nil {
+		return store.Proposal{}, err
+	}
+	if busy {
+		return store.Proposal{}, errors.New("already pulling the actions out of this conversation")
+	}
+
+	p, err := e.Store.CreateProposal(ctx, store.Proposal{
+		Kind:     store.ProposalChat,
+		State:    store.ProposalAnalysing,
+		ChatID:   chatID,
+		RepoID:   repo.ID,
+		RepoPath: repo.Path,
+		Detected: repo.Detected,
+		MaxTasks: 12,
+		Model:    e.Cfg.AnalysisModel,
+		Notes:    "pulled from the chat about " + repo.Slug,
+	})
+	if err != nil {
+		return store.Proposal{}, err
+	}
+	e.notifyProposal()
+
+	go e.pullActions(context.WithoutCancel(ctx), chatID, p.ID)
+	return p, nil
+}
+
+func (e *Engine) pullActions(ctx context.Context, chatID, proposalID int64) {
+	p, err := e.Store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return
+	}
+	turns, err := e.Store.ChatTurns(ctx, chatID, chatTail)
+	if err != nil {
+		e.failProposal(ctx, proposalID, err.Error(), agent.Result{})
+		return
+	}
+	filed, err := e.Store.ChatPulledGoals(ctx, chatID, 50)
+	if err != nil {
+		e.failProposal(ctx, proposalID, err.Error(), agent.Result{})
+		return
+	}
+
+	prompt := PullActionsPrompt(renderConversation(turns), p.Detected, filed, p.MaxTasks)
+	tasks, spent, err := e.runPull(ctx, &p, prompt)
+	if err != nil {
+		e.failProposal(ctx, proposalID, err.Error(), spent)
+		return
+	}
+
+	// Validation has already run over the model's own list, so depends_on is
+	// known to point backwards only. Dropping happens after that, so the graph
+	// it checked is the one the model actually proposed.
+	tasks = dropAlreadyFiled(tasks, filed)
+
+	if len(tasks) == 0 {
+		// Not a failure. Either nothing has been decided yet, or everything
+		// that has is already filed — and both are ordinary states for a
+		// conversation that is still going. Discarded rather than a state of
+		// its own: every switch in the dashboard would otherwise have to learn
+		// one, and this way it stays in the history carrying what it cost.
+		e.finishEmptyPull(ctx, proposalID, spent)
+		return
+	}
+
+	rows := make([]store.ProposalTask, 0, len(tasks))
+	for i, t := range tasks {
+		rows = append(rows, store.ProposalTask{
+			Ord:         i,
+			Key:         strings.TrimSpace(t.KeyOrEmpty()),
+			Goal:        strings.TrimSpace(t.GoalOrEmpty()),
+			Constraints: t.Constraints,
+			Verify:      strings.TrimSpace(t.VerifyOrEmpty()),
+			Severity:    t.SeverityOrDefault(),
+			CostCap:     t.CostCapOrZero(),
+			DependsOn:   t.DependsOn,
+			Rationale:   strings.TrimSpace(deref(t.Rationale)),
+			Evidence:    t.Evidence,
+			Selected:    true,
+		})
+	}
+	if err := e.Store.ReplaceProposalTasks(ctx, proposalID, rows); err != nil {
+		e.failProposal(ctx, proposalID, err.Error(), spent)
+		return
+	}
+
+	p, err = e.Store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return
+	}
+	p.State = store.ProposalReady
+	p.ErrMsg = ""
+	p.CostUSD += spent.CostUSD
+	p.InputTokens += spent.InputTokens
+	p.OutputTokens += spent.OutputTokens
+	if err := e.Store.SaveProposal(ctx, p); err != nil {
+		return
+	}
+	e.notifyProposal()
+}
+
+// finishEmptyPull records a pull that correctly found nothing to do.
+func (e *Engine) finishEmptyPull(ctx context.Context, proposalID int64, spent agent.Result) {
+	p, err := e.Store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return
+	}
+	p.State = store.ProposalDiscarded
+	p.ErrMsg = "nothing new has been decided in this conversation yet"
+	p.CostUSD += spent.CostUSD
+	p.InputTokens += spent.InputTokens
+	p.OutputTokens += spent.OutputTokens
+	if err := e.Store.SaveProposal(ctx, p); err != nil {
+		return
+	}
+	e.notifyProposal()
+}
+
+// runPull asks for the task list, with one stricter re-ask.
+//
+// It runs in a FRESH session — never resuming the chat — for three reasons.
+// Resuming would append "reply with JSON and nothing else" to the
+// conversation's own context permanently, and every later reply would be
+// answering with that still in it. Two claude processes would be writing one
+// session file if the operator asked something while a pull ran. And rendering
+// the turns from the database instead means a pull works on a conversation
+// whose session is long gone, and is reproducible.
+//
+// The same shape runAnalysis uses, and for the same reason: a partially
+// understood answer is worse than none, because the operator would be
+// reviewing a list that quietly lost items.
+func (e *Engine) runPull(ctx context.Context, p *store.Proposal, prompt string) ([]agent.ProposedTask, agent.Result, error) {
+	var spent agent.Result
+
+	role, err := e.resolveRole(config.RoleChat)
+	if err != nil {
+		return nil, spent, err
+	}
+	if p.Model != "" {
+		role.Model = p.Model
+	}
+	if err := dirExists(p.RepoPath); err != nil {
+		return nil, spent, err
+	}
+
+	// The pull's own run directory, not the chat's, so it cannot disturb the
+	// conversation's agent state while a question is in flight.
+	runDir := e.proposalDir(p.ID)
+	if err := sandbox.EnsureDirs(runDir); err != nil {
+		return nil, spent, err
+	}
+	if err := prepareAgentStateIn(runDir, role.Agent); err != nil {
+		return nil, spent, err
+	}
+	transcript := filepath.Join(runDir, "pull.jsonl")
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		res, err := role.Runner.Run(ctx, agent.RunSpec{
+			Args:           role.args(prompt, "", "", ""),
+			Dir:            p.RepoPath,
+			TranscriptPath: transcript,
+			Timeout:        e.analysisTimeout(),
+			Attempt:        attempt,
+			Sandbox:        e.Sandbox,
+			SandboxSpec:    e.analysisSandboxSpec(p.RepoPath, runDir, role.Agent),
+			Env:            e.agentEnv(role),
+			OnEvent:        e.progressNotifier(0),
+		})
+		if err != nil {
+			return nil, spent, err
+		}
+		spent.CostUSD += res.CostUSD
+		spent.InputTokens += res.InputTokens
+		spent.OutputTokens += res.OutputTokens
+
+		if p.Provider != role.Provider {
+			p.Provider = role.Provider
+			p.TranscriptPath = transcript
+			if err := e.Store.SaveProposal(ctx, *p); err != nil {
+				return nil, spent, err
+			}
+		}
+
+		if res.ErrMsg != "" {
+			if agent.IsAuthFailure(res.ErrMsg) {
+				e.Pause(fmt.Sprintf("the chat is not authenticated: %s", res.ErrMsg))
+			}
+			return nil, spent, fmt.Errorf("the pull could not finish: %s", res.ErrMsg)
+		}
+
+		tasks, parseErr := agent.ParseActions([]byte(res.FinalText), p.MaxTasks)
+		if parseErr == nil {
+			return tasks, spent, nil
+		}
+		if attempt == 2 {
+			return nil, spent, fmt.Errorf("the pull returned nothing usable: %w", parseErr)
+		}
+		prompt += "\n\nYour previous response could not be parsed: " + parseErr.Error() +
+			"\nReply with the JSON object described above and nothing else."
+	}
+	return nil, spent, errors.New("the pull produced no result")
+}
+
+// dropAlreadyFiled removes work this conversation has produced before.
+//
+// Fingerprinted the same way the backlog collapses repeats, so "already filed"
+// means the same thing on both surfaces. Survivors then lose any depends_on
+// naming something that was dropped: QueueProposal would discard those
+// silently, and a review list that shows a dependency it will not honour is
+// worse than one that never claimed it.
+func dropAlreadyFiled(tasks []agent.ProposedTask, filed []string) []agent.ProposedTask {
+	if len(filed) == 0 {
+		return tasks
+	}
+	seen := make(map[string]bool, len(filed))
+	for _, goal := range filed {
+		seen[store.Fingerprint(goal)] = true
+	}
+
+	kept := make([]agent.ProposedTask, 0, len(tasks))
+	keys := make(map[string]bool, len(tasks))
+	for _, t := range tasks {
+		if seen[store.Fingerprint(t.GoalOrEmpty())] {
+			continue
+		}
+		keys[strings.TrimSpace(t.KeyOrEmpty())] = true
+		kept = append(kept, t)
+	}
+	for i := range kept {
+		deps := kept[i].DependsOn[:0:0]
+		for _, dep := range kept[i].DependsOn {
+			if keys[strings.TrimSpace(dep)] {
+				deps = append(deps, dep)
+			}
+		}
+		kept[i].DependsOn = deps
+	}
+	return kept
+}

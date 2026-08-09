@@ -160,6 +160,13 @@ func (e *Engine) RegenerateProposal(ctx context.Context, proposalID int64, feedb
 	if p.State != store.ProposalReady && p.State != store.ProposalFailed {
 		return fmt.Errorf("proposal %d is %s; it is not waiting to be regenerated", proposalID, p.State)
 	}
+	// A regenerate runs the analysis prompt. On a task list pulled out of a
+	// conversation that would quietly start a full repository analysis instead
+	// — different work, different cost, and not what the operator asked for.
+	// Pulling again from the chat is the equivalent action there.
+	if p.Kind == store.ProposalChat {
+		return fmt.Errorf("proposal %d came from a conversation; pull the actions again from the chat instead", proposalID)
+	}
 
 	p.State = store.ProposalAnalysing
 	p.ErrMsg = ""
