@@ -83,7 +83,8 @@ func (e *Engine) ImportProposal(ctx context.Context, url string) (store.Proposal
 	}
 	e.notifyProposal()
 
-	go e.clone(context.WithoutCancel(ctx), p.ID, url)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.clone(bg, p.ID, url) })
 	return p, nil
 }
 
@@ -146,7 +147,8 @@ func (e *Engine) ConfigureProposal(ctx context.Context, proposalID int64,
 	}
 	e.notifyProposal()
 
-	go e.analyse(context.WithoutCancel(ctx), p.ID, "")
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.analyse(bg, p.ID, "") })
 	return nil
 }
 
@@ -168,7 +170,8 @@ func (e *Engine) RegenerateProposal(ctx context.Context, proposalID int64, feedb
 	}
 	e.notifyProposal()
 
-	go e.analyse(context.WithoutCancel(ctx), p.ID, feedback)
+	bg := context.WithoutCancel(ctx)
+	e.background(func() { e.analyse(bg, p.ID, feedback) })
 	return nil
 }
 
