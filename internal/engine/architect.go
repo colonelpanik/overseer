@@ -124,16 +124,17 @@ func (e *Engine) architectTurn(ctx context.Context, proposalID int64, message st
 		return
 	}
 
-	prompt := message
-	if p.ArchitectSession == "" || message == "" {
-		// The opening turn, or a session we cannot resume into.
-		prompt = ArchitectPrompt(p.Notes, p.RepoPath != "")
-		if message != "" {
-			prompt += "\n\nTHEY SAID:\n" + message
+	res, err := e.runArchitect(ctx, &p, e.architectPrompt(ctx, p, message, false), "architect")
+	// A resume that fails is recoverable, and has to be. Without this a session
+	// lost at turn twenty made every turn after it fail identically, for ever,
+	// and an hour of design became unusable with no way back. The turns are in
+	// the database precisely so the conversation can be started again.
+	if p.ArchitectSession != "" && (err != nil || res.ErrMsg != "") {
+		p.ArchitectSession = ""
+		if saveErr := e.Store.SaveProposal(ctx, p); saveErr == nil {
+			res, err = e.runArchitect(ctx, &p, e.architectPrompt(ctx, p, message, true), "architect")
 		}
 	}
-
-	res, err := e.runArchitect(ctx, &p, prompt, "architect")
 	if err != nil {
 		e.recordArchitectFailure(ctx, proposalID, err.Error())
 		return
@@ -158,6 +159,30 @@ func (e *Engine) architectTurn(ctx context.Context, proposalID int64, message st
 		return
 	}
 	e.notifyProposal()
+}
+
+// architectPrompt builds one turn's prompt.
+//
+// A resumed session gets the bare message: everything else is already in the
+// agent's own context. The opening turn, or one re-seeding a session that could
+// not be resumed, gets the framing — and in the re-seed case the transcript, so
+// the conversation carries on rather than starting over.
+func (e *Engine) architectPrompt(ctx context.Context, p store.Proposal, message string, reseed bool) string {
+	if p.ArchitectSession != "" && message != "" && !reseed {
+		return message
+	}
+	var conversation string
+	if reseed {
+		turns, err := e.Store.ArchitectTurns(ctx, p.ID)
+		if err == nil {
+			conversation = renderConversation(architectSpoken(turns))
+		}
+	}
+	prompt := ArchitectPrompt(p.Notes, p.RepoPath != "", conversation)
+	if message != "" {
+		prompt += "\n\nTHEY SAID:\n" + message
+	}
+	return prompt
 }
 
 func (e *Engine) recordArchitectFailure(ctx context.Context, proposalID int64, msg string) {

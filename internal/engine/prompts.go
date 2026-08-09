@@ -204,7 +204,12 @@ will see this round again.`, target)
 // It is deliberately told not to produce the task list yet. A model asked to
 // design and to decompose at once does both worse, and the operator has not
 // agreed to anything yet.
-func ArchitectPrompt(brief string, existing bool) string {
+//
+// conversation is empty on the opening turn. It is filled only when a session
+// could not be resumed and the turns have to be replayed from the database, so
+// both paths share one function and the framing cannot drift between a
+// conversation that has been going all along and one just rebuilt.
+func ArchitectPrompt(brief string, existing bool, conversation string) string {
 	var b strings.Builder
 	b.WriteString("You are helping a developer design something, in conversation. " +
 		"They are reading your replies and will answer.\n\n")
@@ -229,6 +234,15 @@ what it is.
 	b.WriteString("WHAT THEY WANT:\n")
 	b.WriteString(strings.TrimSpace(brief))
 	b.WriteString("\n\n")
+
+	if c := strings.TrimSpace(conversation); c != "" {
+		b.WriteString(`THE CONVERSATION SO FAR (your own session was lost, so this is the record
+of it — carry on from here as if you remembered it):
+
+`)
+		b.WriteString(c)
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString(`How to be useful here:
 

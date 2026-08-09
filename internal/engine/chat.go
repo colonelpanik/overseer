@@ -224,7 +224,7 @@ func (e *Engine) chatPrompt(ctx context.Context, chat store.Chat, repo store.Rep
 	if reseed {
 		turns, err := e.Store.ChatTurns(ctx, chat.ID, chatTail)
 		if err == nil {
-			conversation = renderConversation(turns)
+			conversation = renderConversation(chatSpoken(turns))
 		}
 	}
 	prompt := ChatPrompt(repo.Detected, conversation)
@@ -314,30 +314,6 @@ func (e *Engine) chatProvider() string {
 		return ""
 	}
 	return role.Provider
-}
-
-// renderConversation writes turns out as a transcript a model can read.
-//
-// Deliberately plain: two labels and the text. Anything more decorative would
-// be indistinguishable, to the model, from something the operator wrote.
-func renderConversation(turns []store.ChatTurn) string {
-	var b strings.Builder
-	for _, t := range turns {
-		who := "them"
-		if t.Speaker == store.SpeakerOperator {
-			who = "developer"
-		}
-		// A turn that failed records what went wrong, which is a fact about the
-		// daemon rather than anything either of them said.
-		if t.ErrMsg != "" {
-			continue
-		}
-		b.WriteString(who)
-		b.WriteString(": ")
-		b.WriteString(strings.TrimSpace(t.Body))
-		b.WriteString("\n\n")
-	}
-	return strings.TrimSpace(b.String())
 }
 
 // chatDir is where one conversation writes its transcript and per-run agent
@@ -439,7 +415,7 @@ func (e *Engine) pullActions(ctx context.Context, chatID, proposalID int64) {
 		return
 	}
 
-	prompt := PullActionsPrompt(renderConversation(turns), p.Detected, filed, p.MaxTasks)
+	prompt := PullActionsPrompt(renderConversation(chatSpoken(turns)), p.Detected, filed, p.MaxTasks)
 	tasks, spent, err := e.runPull(ctx, &p, prompt)
 	if err != nil {
 		e.failProposal(ctx, proposalID, err.Error(), spent)
