@@ -114,3 +114,37 @@ func TestAnalysisTimeoutIsConfigurableAndNotStricterThanAStep(t *testing.T) {
 		t.Error("a zero analysis_timeout should be refused")
 	}
 }
+
+func TestLoadRejectsNonPositiveMaxIterations(t *testing.T) {
+	// max_iterations is the per-phase iteration budget, not one of the
+	// advisory "0 disables" spend caps: a task handed zero iterations parks
+	// for a human before it does any work, so the value is refused at load
+	// rather than quietly swapped for the default.
+	for _, tc := range []struct{ name, body string }{
+		{"zero", "max_iterations: 0\n"},
+		{"negative", "max_iterations: -1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Errorf("a %s max_iterations should be refused", tc.name)
+			}
+		})
+	}
+
+	// A positive value the operator states explicitly is still honoured.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("max_iterations: 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MaxIterations != 3 {
+		t.Errorf("MaxIterations = %d, want 3", c.MaxIterations)
+	}
+}
