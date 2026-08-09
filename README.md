@@ -32,7 +32,8 @@ Requires `claude`, `codex`, `git`, and `gh` on PATH.
     overseer logs 3                     # one task's steps, verdicts, findings
 
 Do not know what to put in the task list? Open the dashboard and press
-**Analyse a repo**.
+**Analyse a repo** to have one proposed, or **Chat** to ask about the
+repository first and pull the actions out of the answers.
 
 The dashboard is the point. It is one page: the task list on the left, the
 selected task on the right. Every task carries a **`plan 3/10`** counter and a
@@ -81,10 +82,18 @@ task_cap_usd: 0          # advisory default per task, 0 disables
 
 ## Models and providers
 
-Three jobs, each independently configurable: **code** writes the plan and the
+Five jobs, each independently configurable: **code** writes the plan and the
 implementation, **review** judges them and produces the verdict, **analyse**
-reads a repository for the wizard. Each binds to an agent CLI, an endpoint and
-a model.
+reads a repository for the wizard, **architect** talks a design through with
+you, and **chat** answers questions about a repository. Each binds to an agent
+CLI, an endpoint and a model.
+
+They are separate knobs because they want different models. The two
+conversations are the clearest case: the architect decides what everything
+downstream builds and happens once per piece of work, so it defaults to the
+strongest model; the chat answers a question at a time, many times a day, and
+defaults to a middling one. Sharing a role would mean the only way to make
+casual questions cheaper is to make the design conversation cheaper too.
 
 ```yaml
 providers:
@@ -99,9 +108,11 @@ providers:
     models: [qwen3-coder-480b]
 
 roles:
-  code:    {agent: claude, provider: anthropic, model: claude-opus-5}
-  review:  {agent: codex,  provider: inhouse,   model: qwen3-coder-480b}
-  analyse: {agent: claude, provider: anthropic, model: claude-sonnet-5}
+  code:      {agent: claude, provider: anthropic, model: claude-opus-5}
+  review:    {agent: codex,  provider: inhouse,   model: qwen3-coder-480b}
+  analyse:   {agent: claude, provider: anthropic, model: claude-sonnet-5}
+  architect: {agent: claude, provider: anthropic, model: claude-opus-5}
+  chat:      {agent: claude, provider: anthropic, model: claude-sonnet-5}
 ```
 
 Providers are additive: a file naming one in-house endpoint keeps the vendor
@@ -239,6 +250,53 @@ The **analyse** role picks the model (see Models and providers above), and the
 wizard's own dropdown can override it for a single run. It is a separate knob
 from whatever runs the loop: the analysis reads once and writes nothing, so it
 is worth spending less on than the turns that produce the change.
+
+## Asking about a repository
+
+**Chat** is the surface for the questions that come before you know what to ask
+for. *Why does this infer busy from turn order instead of taking a lock? What
+breaks if I change it?* You get an answer grounded in the checkout, citing the
+`file:line` it read — and, when there is a better shape, the offer as a
+question you can answer: *"because a lock in memory dies with the process —
+want an explicit in-flight column instead?"*
+
+When the conversation has decided something, **Pull actions** turns what you
+agreed into a task list. It arrives in the same review pane an analysis uses:
+edit it, deselect what you do not want, queue the rest.
+
+**Pulling does not end the conversation.** That is the whole difference between
+this and the design conversation, which finishes when you accept it. Here you
+pull, queue two of the three, keep talking, and pull again next week. The chat
+is per repository and lives as long as the repository does.
+
+A pull that finds nothing is a normal outcome, not a failure. A conversation
+that has not agreed anything yet has nothing to pull, and so does one where
+everything agreed is already filed — the second pull will say so rather than
+showing you the work you queued an hour ago. What has already been pulled out
+is off-limits to every later pull of the same conversation, deterministically,
+not just by asking nicely.
+
+Some things worth knowing:
+
+- **The checkout is mounted read-only**, `.git` included, exactly as an
+  analysis is. A conversation about a repository cannot leave a branch, a
+  stash or an edit behind in it.
+- **The pull runs in its own session**, not as another turn of the chat. It has
+  to: "reply with JSON and nothing else" would otherwise sit in the
+  conversation's context for ever and every later answer would be shaped by it.
+- **Each reply is one agent turn**, and the overlay says what the conversation
+  has cost under the box. This is the surface most likely to spend real money
+  casually, so the figure is where you are looking rather than somewhere you
+  have to go and find.
+- **New chat** archives the current conversation and starts a fresh one. The
+  old one stays readable. It is for a thread that has wandered somewhere it
+  will not come back from, not for tidying up.
+
+The **chat** role picks the model (see Models and providers above) and defaults
+to a middling one rather than the strongest. The design conversation decides
+what everything downstream builds and happens once per piece of work; this one
+answers a question at a time, many times a day, and reads rather than decides.
+They are separate knobs so you can move either without moving the other.
 
 ## Stopping, starting, restarting
 
