@@ -32,6 +32,14 @@ type Event struct {
 	CostUSD      float64
 	InputTokens  int
 	OutputTokens int
+	// Structured is the schema-validated object a CLI was asked to produce,
+	// as JSON text. Empty unless the run was given a schema.
+	//
+	// It exists because a validated answer does not arrive where an unvalidated
+	// one does: with a schema the CLI reports the object on its result event
+	// rather than as prose in a message, so a reader that only watched messages
+	// would see an empty final answer and no reason why.
+	Structured string
 	// Raw is the original JSON line, written verbatim to the transcript.
 	Raw string
 }
