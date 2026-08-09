@@ -333,3 +333,152 @@ Stop at the point where someone could clone this and start.
 
 Do not commit; that is handled for you.`, strings.TrimSpace(design))
 }
+
+// ChatPrompt opens, or re-opens, a conversation about a repository.
+//
+// This is the architect's sibling and its opposite. The architect is deciding
+// what to build; this one is being asked about what is already there. So where
+// the architect is told to propose a shape, this is told to answer the question
+// asked, cite where the answer came from, and — the part that makes it worth
+// having — offer the better alternative as something the operator can say yes
+// to, rather than as a lecture they have to act on.
+//
+// It is told not to produce a task list for the same reason the architect is:
+// a model asked to answer and to decompose at once does both worse. Here there
+// is also a button for it, and pressing that button is a separate paid turn
+// against a separate session.
+//
+// conversation is empty on the opening turn. It is filled only when a session
+// could not be resumed and the turns have to be replayed from the database,
+// which is why both paths share one function: the framing must not drift
+// between a conversation that has been going all along and one that has just
+// been rebuilt.
+func ChatPrompt(detected, conversation string) string {
+	var b strings.Builder
+	b.WriteString(`A developer is asking you about this repository, in conversation. They are
+reading your replies and will answer.
+
+The checkout is mounted READ-ONLY. Read whatever you need to answer properly —
+the README, the build manifest, the code the question is actually about. You
+cannot edit, commit or run anything that writes, and should not try.
+
+`)
+	if detected = strings.TrimSpace(detected); detected != "" {
+		b.WriteString("WHAT THE DAEMON ALREADY DETECTED:\n")
+		b.WriteString(detected)
+		b.WriteString("\n\n")
+	}
+	if c := strings.TrimSpace(conversation); c != "" {
+		b.WriteString(`THE CONVERSATION SO FAR (your own session was lost, so this is the record
+of it — carry on from here as if you remembered it):
+
+`)
+		b.WriteString(c)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(`How to be useful here:
+
+- Answer the question that was asked, first, in a couple of sentences. Then the
+  reasoning, if it needs any.
+- Ground every claim in a file:line you actually read, and name it. "Because
+  architectBusy at internal/engine/architect.go:106 derives it from turn order"
+  is an answer; "because of how the state is tracked" is not. If you did not
+  read it and are reasoning from the shape of things, say you are guessing.
+- When the answer reveals something worth changing, offer it as a concrete
+  question they can answer — "want an explicit in-flight column instead?" —
+  and stop there. One at a time. You are not writing a report.
+- Disagree when you disagree, including with the premise of the question. If
+  the thing they think is a problem is deliberate, say so and say why.
+- Keep it short enough to read. This is a conversation, not a document.
+
+Do not produce a task list. When they want the work written down they will ask
+for it, and that is a separate step. Reply in prose.`)
+	return b.String()
+}
+
+// PullActionsPrompt turns a conversation into a reviewable task list.
+//
+// It runs against a fresh session with the conversation rendered into it,
+// rather than as another turn of the chat. Resuming would append this
+// instruction — "emit JSON and nothing else" — to the session permanently, and
+// every later reply would be answering with that still in its context. It also
+// means a pull can be taken from a conversation whose session is long gone.
+//
+// The two things it insists on are the two ways this goes wrong. Extracting
+// what was discussed rather than what was decided turns every idea anyone
+// floated into queued work. And a model that will not return an empty list
+// invents something on a conversation that has not agreed anything yet, which
+// is the normal state of every chat for its first few turns.
+func PullActionsPrompt(conversation, detected string, filed []string, maxTasks int) string {
+	var b strings.Builder
+	b.WriteString(`Below is a conversation between a developer and an agent about this
+repository. Turn what they DECIDED into a list of work items.
+
+An automated system will carry each one out on its own branch, in its own
+worktree, reviewed by a second agent until it converges, and open a draft pull
+request. The developer reviews those pull requests. Nothing here runs without
+them queueing it first.
+
+The checkout is mounted READ-ONLY and is the same one the conversation was
+about. Re-check every file:line you carry over — the conversation may have been
+loose about them, and a task list must not be.
+
+`)
+	if detected = strings.TrimSpace(detected); detected != "" {
+		b.WriteString("WHAT THE DAEMON ALREADY DETECTED:\n")
+		b.WriteString(detected)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("THE CONVERSATION:\n\n")
+	b.WriteString(strings.TrimSpace(conversation))
+	b.WriteString("\n\n")
+
+	if len(filed) > 0 {
+		b.WriteString(`ALREADY PULLED OUT OF THIS CONVERSATION — do not propose any of these
+again, whatever became of them. The developer has seen each one and decided:
+
+`)
+		for _, goal := range filed {
+			if goal = strings.TrimSpace(goal); goal != "" {
+				b.WriteString("- ")
+				b.WriteString(goal)
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	fmt.Fprintf(&b, `This conversation is still going. Extract what was DECIDED, not what was
+discussed. A suggestion the agent made and the developer did not take up is not
+an action. A question nobody answered is not an action. An explanation of how
+something already works is not an action.
+
+AN EMPTY "tasks" ARRAY IS A CORRECT ANSWER, and you should give it whenever
+either is true: nothing has been agreed yet, or everything that was agreed is
+already in the list above. Do not invent work to fill the list — the developer
+will keep talking and pull again.
+
+Propose at most %d tasks. Each one must be:
+
+- ONE self-contained change an agent can finish and a reviewer can judge. Not a
+  theme, not an area of the codebase. If you cannot describe the diff you
+  expect, it is not a task.
+- Traceable to the conversation. "rationale" says in one sentence what was
+  decided and "evidence" lists the file:line references behind it.
+- Carried by this repository's own conventions, in "constraints".
+
+Set "verify" to the command that would prove the task is done in this
+repository — the test command that actually exists here. Use null only if this
+repository genuinely has none.
+
+Use "depends_on" only for a real ordering constraint, naming the "key" of a
+task EARLIER in your array. Never name a later task and never form a cycle.
+
+Reply with a single JSON object matching this schema and nothing else — no
+prose before it, no explanation after it, no markdown fence:
+
+%s`, maxTasks, strings.TrimSpace(string(agent.ProposalSchema)))
+	return b.String()
+}
