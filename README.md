@@ -160,11 +160,11 @@ real files.
 
 **For a new project**, give it a path instead. The directory is created and
 initialised before the conversation starts, so there is somewhere real to work.
-Accepting writes `DESIGN.md`, scaffolds the project, and *then* proposes the
-tasks against what was actually built. From a terminal, `overseer new -brief "…"
-<path>` does the same opening: it creates the project, waits for the architect's
-first reply — one agent turn, so give it a minute — and then prints where to
-carry the conversation on.
+`overseer new` then waits for the architect's opening reply — a minute or two —
+before it prints where to carry the conversation on. Interrupt it and the agent
+is stopped and the interruption recorded as a turn, so the conversation is still
+there to continue from the dashboard. Accepting writes `DESIGN.md`, scaffolds
+the project, and *then* proposes the tasks against what was actually built.
 
 ### Why the scaffold is not a task
 
