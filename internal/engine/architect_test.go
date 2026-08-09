@@ -462,3 +462,70 @@ func TestAcceptCarriesTheArchitectsSubjectOntoTheRowsAndTheTask(t *testing.T) {
 		t.Errorf("task Slug = %q, want the subject's slug", created[0].Slug)
 	}
 }
+
+// The entry point `overseer new` uses. It must not return until the reply is in
+// the store, because that command closes the database the moment it does. There
+// is deliberately no waitForTurns here: reading the turns straight after the
+// call IS the assertion.
+func TestStartDesignAndWaitReturnsWithTheReplyAlreadyRecorded(t *testing.T) {
+	h := newHarness(t, fakeArchitect(t, "Two questions before I sketch this."), "true")
+	ctx := context.Background()
+
+	p, err := h.eng.StartDesignAndWait(ctx, "", "a CLI that syncs S3 buckets, Go, no dependencies", false)
+	if err != nil {
+		t.Fatalf("StartDesignAndWait: %v", err)
+	}
+
+	turns, err := h.st.ArchitectTurns(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("got %d turns the instant the call returned, want the brief and the reply", len(turns))
+	}
+	if turns[0].Speaker != store.SpeakerOperator {
+		t.Errorf("first turn = %s, want the operator's brief", turns[0].Speaker)
+	}
+	if turns[1].Speaker != store.SpeakerArchitect || !strings.Contains(turns[1].Body, "Two questions") {
+		t.Errorf("second turn = %s: %q, want the architect's reply", turns[1].Speaker, turns[1].Body)
+	}
+}
+
+// A turn that produced no reply has to reach the waiting caller as an error —
+// `overseer new` prints a wizard URL on the strength of this return value — and
+// must still be recorded as a turn, so the conversation survives it exactly as
+// it does on the dashboard.
+func TestStartDesignAndWaitReportsATurnThatProducedNoReply(t *testing.T) {
+	h := newHarness(t, writeScript(t, "claude", `
+echo 'the architect fell over' >&2
+exit 1
+`), "true")
+	ctx := context.Background()
+
+	if _, err := h.eng.StartDesignAndWait(ctx, "", "a thing", false); err == nil {
+		t.Fatal("StartDesignAndWait returned nil for a turn that never produced a reply")
+	} else if !strings.Contains(err.Error(), "the architect fell over") {
+		t.Errorf("err = %v, want it to carry the agent's own failure", err)
+	}
+
+	// The proposal is found by listing, because the error path returns no
+	// proposal — which is exactly why the conversation surviving is worth
+	// asserting separately.
+	props, err := h.st.ListProposals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props) != 1 {
+		t.Fatalf("got %d proposals, want the one the conversation opened", len(props))
+	}
+	if props[0].State != store.ProposalDesigning {
+		t.Errorf("State = %q; one bad turn ended the whole conversation", props[0].State)
+	}
+	turns, err := h.st.ArchitectTurns(ctx, props[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 || turns[1].ErrMsg == "" {
+		t.Fatalf("turns = %+v, want the failure recorded as the architect's turn", turns)
+	}
+}
