@@ -90,3 +90,50 @@ func (s *Store) ArchitectSpend(ctx context.Context, proposalID int64) (float64, 
 	}
 	return cost, nil
 }
+
+// FailStrandedArchitectTurns answers every design conversation left waiting on
+// a reply by a daemon restart.
+//
+// The counterpart to FailStrandedChatTurns, and stranded the same way: a turn
+// is a goroutine, not a claimable task, and busy is derived from the operator
+// having spoken last — so nothing else would ever clear it and the wizard would
+// say "thinking…" for ever.
+//
+// Only conversations still being designed. Once a proposal has been accepted,
+// failed or discarded, its transcript is a record rather than something anyone
+// is waiting on, and appending to it would be rewriting history.
+func (s *Store) FailStrandedArchitectTurns(ctx context.Context, reason string) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT p.id FROM proposals p
+		WHERE p.state = ?
+		  AND (SELECT t.speaker FROM architect_turns t
+		       WHERE t.proposal_id = p.id ORDER BY t.id DESC LIMIT 1) = ?`,
+		ProposalDesigning, SpeakerOperator)
+	if err != nil {
+		return 0, fmt.Errorf("find stranded design conversations: %w", err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan stranded design conversation: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, id := range ids {
+		_, err := s.AddArchitectTurn(ctx, ArchitectTurn{
+			ProposalID: id, Speaker: SpeakerArchitect,
+			Body: "I could not reply: " + reason, ErrMsg: reason,
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
+}
