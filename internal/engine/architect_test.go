@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"overseer/internal/agent"
 	"overseer/internal/store"
 )
 
@@ -463,17 +465,51 @@ func TestAcceptCarriesTheArchitectsSubjectOntoTheRowsAndTheTask(t *testing.T) {
 	}
 }
 
-// The entry point `overseer new` uses. It must not return until the reply is in
-// the store, because that command closes the database the moment it does. There
-// is deliberately no waitForTurns here: reading the turns straight after the
-// call IS the assertion.
-func TestStartDesignAndWaitReturnsWithTheReplyAlreadyRecorded(t *testing.T) {
+// `overseer new` is one process doing one thing: it owns the store and closes
+// it on the way out. Scheduling the opening turn and returning killed it
+// mid-flight and closed the database under whatever was left of it, then
+// pointed the operator at a conversation containing nothing but their own
+// brief.
+func TestStartDesignAndWaitReturnsOnlyAfterTheReplyIsRecorded(t *testing.T) {
 	h := newHarness(t, fakeArchitect(t, "Two questions before I sketch this."), "true")
 	ctx := context.Background()
 
-	p, err := h.eng.StartDesignAndWait(ctx, "", "a CLI that syncs S3 buckets, Go, no dependencies", false)
+	p, err := h.eng.StartDesignAndWait(ctx, "", "a CLI that syncs S3 buckets", false)
 	if err != nil {
 		t.Fatalf("StartDesignAndWait: %v", err)
+	}
+
+	// Read once, with no polling: if this needs to wait, the method did not.
+	turns, err := h.st.ArchitectTurns(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("got %d turn(s), want the brief and the reply", len(turns))
+	}
+	if turns[1].Speaker != store.SpeakerArchitect {
+		t.Errorf("second turn = %s, want the architect", turns[1].Speaker)
+	}
+	if !strings.Contains(turns[1].Body, "Two questions") {
+		t.Errorf("architect said %q", turns[1].Body)
+	}
+}
+
+// A turn that produced no reply is an error to a caller that waited for one,
+// even though it is also recorded as a turn: `overseer new` must exit non-zero
+// rather than print a URL as though a conversation had started. The proposal
+// comes back regardless, because the conversation exists and is where the
+// operator should be sent.
+func TestStartDesignAndWaitReportsATurnThatProducedNoReply(t *testing.T) {
+	h := newHarness(t, writeScript(t, "claude", "exit 1"), "true")
+	ctx := context.Background()
+
+	p, err := h.eng.StartDesignAndWait(ctx, "", "a thing", false)
+	if err == nil {
+		t.Fatal("StartDesignAndWait returned nil for a turn that produced no reply")
+	}
+	if p.ID == 0 {
+		t.Fatal("no proposal returned; there would be nowhere to send the operator")
 	}
 
 	turns, err := h.st.ArchitectTurns(ctx, p.ID)
@@ -481,51 +517,222 @@ func TestStartDesignAndWaitReturnsWithTheReplyAlreadyRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(turns) != 2 {
-		t.Fatalf("got %d turns the instant the call returned, want the brief and the reply", len(turns))
+		t.Fatalf("got %d turn(s), want the brief and a recorded failure", len(turns))
 	}
-	if turns[0].Speaker != store.SpeakerOperator {
-		t.Errorf("first turn = %s, want the operator's brief", turns[0].Speaker)
-	}
-	if turns[1].Speaker != store.SpeakerArchitect || !strings.Contains(turns[1].Body, "Two questions") {
-		t.Errorf("second turn = %s: %q, want the architect's reply", turns[1].Speaker, turns[1].Body)
+	if turns[1].ErrMsg == "" {
+		t.Error("the failure was not recorded on the turn")
 	}
 }
 
-// A turn that produced no reply has to reach the waiting caller as an error —
-// `overseer new` prints a wizard URL on the strength of this return value — and
-// must still be recorded as a turn, so the conversation survives it exactly as
-// it does on the dashboard.
-func TestStartDesignAndWaitReportsATurnThatProducedNoReply(t *testing.T) {
-	h := newHarness(t, writeScript(t, "claude", `
-echo 'the architect fell over' >&2
-exit 1
-`), "true")
-	ctx := context.Background()
+// hangingArchitect emits its session line and then hangs until its process
+// group is killed. It stands in for the architect mid-reply.
+//
+// It signals that it started through its stdout rather than a file, because it
+// runs inside the sandbox where nothing the test owns is mounted — but the
+// runner mirrors every line it prints into the transcript, which is written
+// outside. See waitForArchitectStart.
+func hangingArchitect(t *testing.T) string {
+	t.Helper()
+	return writeScript(t, "claude", `
+echo '{"type":"system","subtype":"init","session_id":"arch-sess"}'
+# Hang until the process group is killed.
+while true; do sleep 0.05; done
+`)
+}
 
-	if _, err := h.eng.StartDesignAndWait(ctx, "", "a thing", false); err == nil {
-		t.Fatal("StartDesignAndWait returned nil for a turn that never produced a reply")
-	} else if !strings.Contains(err.Error(), "the architect fell over") {
-		t.Errorf("err = %v, want it to carry the agent's own failure", err)
+// waitForArchitectStart blocks until the agent has actually produced output,
+// which is the only proof it is running rather than about to.
+func waitForArchitectStart(t *testing.T, h *harness, proposalID int64) {
+	t.Helper()
+	path := filepath.Join(h.eng.proposalDir(proposalID), "architect.jsonl")
+	waitFor(t, "the architect to start replying", func() bool {
+		b, err := os.ReadFile(path)
+		return err == nil && strings.Contains(string(b), "arch-sess")
+	})
+}
+
+// Ctrl-C during `overseer new`. The agent is in a process group of its own, so
+// only the cancelled context reaches it — and the failure then has to be
+// written with a context that is NOT the cancelled one, or nothing is recorded
+// at all. That is the whole defect: architectBusy reads a conversation whose
+// last speaker is the operator as "a reply is still coming", so Say refuses,
+// and an unrecorded failure wedges the conversation for good.
+func TestAnInterruptedTurnIsRecordedAsAFailure(t *testing.T) {
+	h := newHarness(t, hangingArchitect(t), "true")
+	// Bounds the test if the cancellation somehow fails to reach the agent,
+	// rather than sitting on the 30-minute default.
+	h.eng.Cfg.AnalysisTimeout = 30 * time.Second
+
+	p, err := h.eng.openDesign(context.Background(), "", "a thing", false)
+	if err != nil {
+		t.Fatalf("openDesign: %v", err)
 	}
 
-	// The proposal is found by listing, because the error path returns no
-	// proposal — which is exactly why the conversation surviving is worth
-	// asserting separately.
-	props, err := h.st.ListProposals(ctx)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.eng.architectTurn(ctx, p.ID, "") }()
+
+	waitForArchitectStart(t, h, p.ID)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an interrupted turn reported success")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("architectTurn did not return after its context was cancelled")
+	}
+
+	turns, err := h.st.ArchitectTurns(context.Background(), p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(props) != 1 {
-		t.Fatalf("got %d proposals, want the one the conversation opened", len(props))
+	if len(turns) != 2 {
+		t.Fatalf("got %d turn(s), want the brief and a recorded interruption", len(turns))
 	}
-	if props[0].State != store.ProposalDesigning {
-		t.Errorf("State = %q; one bad turn ended the whole conversation", props[0].State)
+	if !strings.Contains(turns[1].ErrMsg, "interrupted") {
+		t.Errorf("the interrupted turn recorded %q; a killed agent reports "+
+			"\"signal: killed\", which reads as a crash", turns[1].ErrMsg)
 	}
-	turns, err := h.st.ArchitectTurns(ctx, props[0].ID)
+}
+
+// The session exists on disk whatever happened to the context, and losing it
+// would silently start the conversation over on the next turn — from the
+// dashboard, where the operator goes to pick up what they interrupted.
+func TestAnInterruptedTurnKeepsTheSession(t *testing.T) {
+	h := newHarness(t, hangingArchitect(t), "true")
+	h.eng.Cfg.AnalysisTimeout = 30 * time.Second
+
+	p, err := h.eng.openDesign(context.Background(), "", "a thing", false)
+	if err != nil {
+		t.Fatalf("openDesign: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.eng.architectTurn(ctx, p.ID, "") }()
+
+	waitForArchitectStart(t, h, p.ID)
+	cancel()
+	<-done
+
+	got, err := h.st.GetProposal(context.Background(), p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(turns) != 2 || turns[1].ErrMsg == "" {
-		t.Fatalf("turns = %+v, want the failure recorded as the architect's turn", turns)
+	if got.ArchitectSession != "arch-sess" {
+		t.Errorf("ArchitectSession = %q, want arch-sess", got.ArchitectSession)
+	}
+}
+
+// The first window: Ctrl-C between creating the project and the turn reading
+// the store. GetProposal fails with the dead context — database/sql checks
+// ctx.Done() before it does anything else, so this is exactly what happens and
+// not merely what might — and returning that error without writing anything
+// wedges the conversation as thoroughly as a killed agent does.
+func TestATurnCancelledBeforeItReadsTheStoreRecordsAFailure(t *testing.T) {
+	h := newHarness(t, fakeArchitect(t, "never reached"), "true")
+
+	p, err := h.eng.openDesign(context.Background(), "", "a thing", false)
+	if err != nil {
+		t.Fatalf("openDesign: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := h.eng.architectTurn(ctx, p.ID, ""); err == nil {
+		t.Fatal("architectTurn returned nil for an already-cancelled context")
+	}
+
+	turns, err := h.st.ArchitectTurns(context.Background(), p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("got %d turn(s); the conversation was left with the operator "+
+			"as its last speaker, which Say refuses to continue", len(turns))
+	}
+	if !strings.Contains(turns[1].ErrMsg, "interrupted") {
+		t.Errorf("the store read failed with %q; the operator pressed Ctrl-C, "+
+			"and that is what the turn should say", turns[1].ErrMsg)
+	}
+}
+
+// Every way of pressing Ctrl-C arrives here wearing a different disguise: the
+// runner reports the SIGKILLed agent as "signal: killed", and the store reports
+// the dead context as "context canceled". Neither says what happened; ctx does.
+//
+// Called directly because that is the only way to pin the substitution and the
+// detached write on their own, without a turn's worth of scheduling in between.
+func TestFailArchitectTurnRecordsThroughACancelledContext(t *testing.T) {
+	h := newHarness(t, "true", "true")
+
+	p, err := h.eng.openDesign(context.Background(), "", "a thing", false)
+	if err != nil {
+		t.Fatalf("openDesign: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := h.eng.failArchitectTurn(ctx, p.ID, "signal: killed"); err == nil {
+		t.Fatal("failArchitectTurn returned nil for a failed turn")
+	}
+
+	turns, err := h.st.ArchitectTurns(context.Background(), p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("got %d turn(s); the failure was not written at all", len(turns))
+	}
+	if turns[1].ErrMsg != interruptedMsg {
+		t.Errorf("recorded %q, want %q", turns[1].ErrMsg, interruptedMsg)
+	}
+}
+
+// The third window: Ctrl-C after the architect replied but before the reply is
+// written down. The reply happened and was paid for, so the cancelled context
+// must not be what decides whether it survives — and a reply that vanishes
+// leaves the conversation wedged in exactly the way a lost failure does, from
+// the one path where nothing actually went wrong.
+//
+// The window itself is the gap between two statements and cannot be scheduled
+// from a test, so the insert is its own function and this pins it directly.
+func TestAReplyIsRecordedThroughACancelledContext(t *testing.T) {
+	h := newHarness(t, "true", "true")
+
+	p, err := h.eng.openDesign(context.Background(), "", "a thing", false)
+	if err != nil {
+		t.Fatalf("openDesign: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res := agent.Result{CostUSD: 0.3, InputTokens: 100, OutputTokens: 50}
+	if err := h.eng.recordArchitectReply(ctx, p.ID, "Two questions.", res); err != nil {
+		t.Fatalf("recordArchitectReply: %v", err)
+	}
+
+	turns, err := h.st.ArchitectTurns(context.Background(), p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("got %d turn(s); the reply was thrown away", len(turns))
+	}
+	if turns[1].Speaker != store.SpeakerArchitect || turns[1].Body != "Two questions." {
+		t.Errorf("second turn = %s: %q", turns[1].Speaker, turns[1].Body)
+	}
+	if turns[1].ErrMsg != "" {
+		t.Errorf("a delivered reply recorded an error: %q", turns[1].ErrMsg)
+	}
+	if turns[1].CostUSD == 0 {
+		t.Error("the reply recorded no usage; it was paid for either way")
 	}
 }
