@@ -267,6 +267,93 @@ func TestRunTaskEscalatesOnRepeatedFindings(t *testing.T) {
 	}
 }
 
+// The end-to-end version of the recurrence marker: a finding the reviewer
+// raises again has to reach the agent described as a repeat, or the second
+// request is worded exactly like the first and the likeliest reply is the same
+// one.
+//
+// The reviewer drops one of its two findings on the second round, which is the
+// case worth catching: the blocking set has changed, so the oscillation check
+// does not fire, and without the marker nothing at all tells the agent that
+// the finding it just failed to fix is back.
+func TestARecurringFindingReachesTheAgentMarkedAsOne(t *testing.T) {
+	// Claude records the prompt it was handed. The worktree is the one
+	// directory it is certainly allowed to write to under the sandbox, and an
+	// escalated task keeps its worktree, so the log survives to be read.
+	claude := writeScript(t, "claude", `
+last=""
+for a in "$@"; do last="$a"; done
+printf '%s\n--- END OF PROMPT ---\n' "$last" >> prompts.txt
+echo '{"type":"system","subtype":"init","session_id":"claude-sess"}'
+echo '# plan' > PLAN.md
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]},"session_id":"claude-sess"}'
+echo '{"type":"result","subtype":"success","is_error":false,"session_id":"claude-sess","total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":2}}'
+`)
+	// Two findings, then only the first — twice, so the run ends in escalation
+	// rather than running to the iteration cap.
+	codex := writeScript(t, "codex", `
+last=""; prev=""
+for a in "$@"; do
+  if [ "$prev" = "--output-last-message" ]; then last="$a"; fi
+  prev="$a"
+done
+counter="$(dirname "$last")/counter"
+n=0
+[ -f "$counter" ] && n=$(cat "$counter")
+n=$((n+1)); echo $n > "$counter"
+echo '{"type":"thread.started","thread_id":"codex-thread"}'
+if [ "$n" -eq 1 ]; then
+  printf '%s' '{"verdict":"changes_requested","findings":[{"severity":"major","summary":"the error from os.Open is discarded","file":null,"line":null},{"severity":"major","summary":"no test covers the new branch","file":null,"line":null}]}' > "$last"
+else
+  printf '%s' '{"verdict":"changes_requested","findings":[{"severity":"major","summary":"the error from os.Open is discarded","file":null,"line":null}]}' > "$last"
+fi
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+`)
+	h := newHarness(t, claude, codex)
+	ctx := context.Background()
+
+	task := h.submit(t, "Keeps dropping the error")
+	if err := h.eng.RunTask(ctx, task.ID); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+	got, err := h.st.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != string(loop.StateEscalated) {
+		t.Fatalf("State = %q (err %q), want escalated", got.State, got.ErrMsg)
+	}
+
+	log, err := os.ReadFile(filepath.Join(got.WorktreeDir, "prompts.txt"))
+	if err != nil {
+		t.Fatalf("the agent recorded no prompts: %v", err)
+	}
+	prompts := strings.Split(string(log), "--- END OF PROMPT ---")
+	if len(prompts) < 4 {
+		t.Fatalf("got %d prompts, want the opener and two revisions:\n%s", len(prompts)-1, log)
+	}
+
+	// The first revision is the finding's first outing and must read plainly.
+	if strings.Contains(prompts[1], "ALREADY RAISED") {
+		t.Errorf("the first revision marks a finding nobody had raised before:\n%s", prompts[1])
+	}
+	// The second is the recurrence.
+	if !strings.Contains(prompts[2], "ALREADY RAISED") {
+		t.Errorf("the recurring finding reached the agent unmarked:\n%s", prompts[2])
+	}
+	if !strings.Contains(prompts[2], "round 2") {
+		t.Errorf("the marker does not say which round this is:\n%s", prompts[2])
+	}
+	if !strings.Contains(prompts[2], "did not fix it") {
+		t.Errorf("the agent was not told its previous attempt failed:\n%s", prompts[2])
+	}
+	// The finding that was fixed is gone from the round, so nothing should
+	// describe it as recurring.
+	if strings.Contains(prompts[2], "no test covers the new branch") {
+		t.Errorf("a finding the reviewer dropped is still in the prompt:\n%s", prompts[2])
+	}
+}
+
 func TestRunTaskFailsWhenCodexReturnsProse(t *testing.T) {
 	// Unparseable output must never be read as approval.
 	h := newHarness(t, fakeClaude(t, ""), fakeCodex(t, `Looks good to me!`))

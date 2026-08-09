@@ -272,6 +272,42 @@ func (s *Store) AllReviewRounds(ctx context.Context) (map[int64][]ReviewRound, e
 	return out, rows.Err()
 }
 
+// BlockingSummaryCounts reports how many review rounds have raised each
+// blocking summary on a task, the round that has just finished included.
+//
+// Counted by summary alone, not by the severity-file-line key the oscillation
+// fingerprint uses. An agent editing a file moves the lines under a finding
+// that has not changed, so keying on the location would call the second
+// occurrence new — which is exactly the case worth telling the agent about.
+// Being over-eager here is cheap: the worst outcome is a prompt that says a
+// finding recurred when the reviewer had merely worded two of them alike.
+//
+// A count of 1 means the round that just ran is the first to raise it. Two or
+// more means it has come back.
+func (s *Store) BlockingSummaryCounts(ctx context.Context, taskID int64) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.summary, COUNT(DISTINCT s.id)
+		FROM steps s
+		JOIN findings f ON f.step_id = s.id AND f.blocking = 1
+		WHERE s.task_id = ? AND s.verdict <> ''
+		GROUP BY f.summary`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("blocking summary counts: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]int{}
+	for rows.Next() {
+		var summary string
+		var n int
+		if err := rows.Scan(&summary, &n); err != nil {
+			return nil, fmt.Errorf("scan blocking summary count: %w", err)
+		}
+		out[summary] = n
+	}
+	return out, rows.Err()
+}
+
 // AllTotals sums cost and tokens for every task in one statement. The board
 // shows spend on every card, and TaskTotals per card is a query per card.
 func (s *Store) AllTotals(ctx context.Context) (map[int64]Totals, error) {

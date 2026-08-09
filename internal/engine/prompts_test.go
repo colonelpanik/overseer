@@ -53,7 +53,7 @@ func TestReviseWithFindingsRendersEverySeverityAndLocation(t *testing.T) {
 		{Severity: agent.SevMajor, Summary: "error from os.Open discarded", File: &file, Line: &line},
 		{Severity: agent.SevNit, Summary: "rename tmp to buf"},
 	}
-	p := ReviseWithFindingsPrompt("PLAN.md", findings)
+	p := ReviseWithFindingsPrompt("PLAN.md", findings, nil)
 	for _, want := range []string{
 		"major", "error from os.Open discarded", "main.go", "12",
 		"nit", "rename tmp to buf", "PLAN.md",
@@ -67,9 +67,64 @@ func TestReviseWithFindingsRendersEverySeverityAndLocation(t *testing.T) {
 func TestReviseWithFindingsHandlesNoLocation(t *testing.T) {
 	p := ReviseWithFindingsPrompt("the code", []agent.Finding{
 		{Severity: agent.SevMajor, Summary: "no tests"},
-	})
+	}, nil)
 	if strings.Contains(p, ":0") {
 		t.Errorf("a finding with no line must not render as \":0\":\n%s", p)
+	}
+}
+
+// A first-round finding must read exactly as it did before recurrence markers
+// existed: the marker is the signal, and a prompt that shouts on every finding
+// says nothing.
+func TestReviseWithFindingsSaysNothingAboutAFirstTimeFinding(t *testing.T) {
+	raised := map[string]int{"no tests": 1}
+	p := ReviseWithFindingsPrompt("the code", []agent.Finding{
+		{Severity: agent.SevMajor, Summary: "no tests"},
+	}, raised)
+	for _, unwanted := range []string{"ALREADY RAISED", "come back", "did not fix"} {
+		if strings.Contains(p, unwanted) {
+			t.Errorf("a first-round finding must not be marked as recurring (%q):\n%s", unwanted, p)
+		}
+	}
+}
+
+// The whole point of the change: the second request must not be worded like
+// the first, or the likeliest reply is the same one.
+func TestReviseWithFindingsMarksAFindingThatHasComeBack(t *testing.T) {
+	raised := map[string]int{"error from os.Open discarded": 2}
+	p := ReviseWithFindingsPrompt("the code", []agent.Finding{
+		{Severity: agent.SevMajor, Summary: "error from os.Open discarded"},
+		{Severity: agent.SevNit, Summary: "rename tmp to buf"},
+	}, raised)
+
+	if !strings.Contains(p, "ALREADY RAISED") {
+		t.Errorf("the recurring finding is not marked:\n%s", p)
+	}
+	if !strings.Contains(p, "round 2") {
+		t.Errorf("the marker does not say which round this is:\n%s", p)
+	}
+	// The count in the closing paragraph is of recurring findings, not of all
+	// of them: "2 of these have come back" on a list where one has is the kind
+	// of wrongness that makes an agent distrust the rest of the prompt.
+	if !strings.Contains(p, "One of these has come back") {
+		t.Errorf("the closing paragraph miscounts the repeats:\n%s", p)
+	}
+	// It has to say the previous approach failed, not merely that the finding
+	// is old — "try again" is the instruction that produces the same answer.
+	if !strings.Contains(p, "did not fix it") {
+		t.Errorf("the prompt does not tell the agent its last attempt failed:\n%s", p)
+	}
+}
+
+// Findings are matched on the trimmed summary, because that is the form the
+// store counts and a reviewer's stray whitespace must not hide a repeat.
+func TestReviseWithFindingsMatchesOnTheTrimmedSummary(t *testing.T) {
+	raised := map[string]int{"no tests": 3}
+	p := ReviseWithFindingsPrompt("the code", []agent.Finding{
+		{Severity: agent.SevMajor, Summary: "  no tests\n"},
+	}, raised)
+	if !strings.Contains(p, "round 3") {
+		t.Errorf("whitespace around a summary hid the recurrence:\n%s", p)
 	}
 }
 

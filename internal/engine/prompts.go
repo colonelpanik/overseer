@@ -169,10 +169,19 @@ prose before it, no explanation after it, no markdown fence:
 // ReviseWithFindingsPrompt renders a reviewer's blocking findings as the next
 // turn of an existing agent session. target names what to revise, so the same
 // function serves both loops.
-func ReviseWithFindingsPrompt(target string, findings []agent.Finding) string {
+//
+// raised maps a finding's summary to how many rounds have raised it, this one
+// included, as store.BlockingSummaryCounts returns it. A finding at two or
+// more is one the agent has already been asked to fix and has not, and saying
+// so is the whole point: without it the second request is worded exactly like
+// the first, and the likeliest thing a model does with an identical prompt is
+// give an identical answer. A nil map renders the plain form.
+func ReviseWithFindingsPrompt(target string, findings []agent.Finding, raised map[string]int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "An independent reviewer examined your work and raised %d finding(s):\n\n",
 		len(findings))
+
+	repeats := 0
 	for i, f := range findings {
 		fmt.Fprintf(&b, "%d. [%s] ", i+1, f.Severity)
 		if file := f.FileOrEmpty(); file != "" {
@@ -184,6 +193,14 @@ func ReviseWithFindingsPrompt(target string, findings []agent.Finding) string {
 		}
 		b.WriteString(strings.TrimSpace(f.Summary))
 		b.WriteString("\n")
+		// The marker goes on the finding rather than only in the closing
+		// paragraph, so an agent working down a list of twelve reads it at the
+		// one that needs it rather than having to match numbers back up.
+		if n := raised[strings.TrimSpace(f.Summary)]; n > 1 {
+			repeats++
+			fmt.Fprintf(&b, "   ^ ALREADY RAISED: this is round %d for this finding, and your\n"+
+				"     previous attempt did not resolve it.\n", n)
+		}
 		if d := strings.TrimSpace(f.Detail); d != "" {
 			// Volatile context — command output and the like. Kept out of
 			// Summary so it does not perturb the fingerprint, but the agent
@@ -193,10 +210,30 @@ func ReviseWithFindingsPrompt(target string, findings []agent.Finding) string {
 			b.WriteString("\n\n")
 		}
 	}
+
 	fmt.Fprintf(&b, `
 Address every finding in %s. Where you disagree with a finding, say so
 explicitly and explain why rather than silently ignoring it — the reviewer
 will see this round again.`, target)
+
+	if repeats > 0 {
+		subject, object := fmt.Sprintf("%d of these have", repeats), "them"
+		if repeats == 1 {
+			subject, object = "One of these has", "it"
+		}
+		// Named as a fact about the previous attempt rather than as
+		// encouragement to try harder: the useful instruction is "the thing you
+		// did does not work", and the useless one is "do it properly this time".
+		fmt.Fprintf(&b, `
+
+%s come back from an earlier round. Whatever you did last time
+did not fix %s, so do not do it again — work out why the reviewer is still
+seeing the problem before you change anything, and take a different approach.
+If you believe a finding is simply wrong, say so outright and give your
+reasoning; that is a real answer and repeating the last one is not. A review
+that raises this same set again stops the task and hands it to a person.`,
+			subject, object)
+	}
 	return b.String()
 }
 

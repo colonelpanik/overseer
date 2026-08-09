@@ -492,6 +492,24 @@ func (e *Engine) failTask(ctx context.Context, task *store.Task, cause error) er
 // dispatch performs one action and returns its outcome. A failing agent
 // yields an Outcome with Failed set, not an error; dispatch's error return is
 // for failures of the machinery itself.
+// timesRaised counts how often each blocking summary has been raised on this
+// task, for the recurrence markers in ReviseWithFindingsPrompt.
+//
+// A failure here returns nil rather than an error, which renders the prompt in
+// its plain form. The counts sharpen the wording of a revision that is
+// happening either way, and failing the task over a lost annotation would
+// trade a real turn for a cosmetic one. The reviewing step it counts has
+// already been committed by the time this runs, so its own findings are in the
+// tally.
+func (e *Engine) timesRaised(ctx context.Context, taskID int64) map[string]int {
+	raised, err := e.Store.BlockingSummaryCounts(ctx, taskID)
+	if err != nil {
+		e.logf("task %d: count recurring findings: %v", taskID, err)
+		return nil
+	}
+	return raised
+}
+
 func (e *Engine) dispatch(ctx context.Context, task *store.Task, action loop.Action) (*loop.Outcome, error) {
 	switch action.Kind {
 	case loop.ActSetupWorktree:
@@ -502,14 +520,16 @@ func (e *Engine) dispatch(ctx context.Context, task *store.Task, action loop.Act
 
 	case loop.ActClaudePlanResume:
 		return e.runClaude(ctx, task, "plan",
-			ReviseWithFindingsPrompt("PLAN.md", action.Findings), action.ResumeSessionID)
+			ReviseWithFindingsPrompt("PLAN.md", action.Findings, e.timesRaised(ctx, task.ID)),
+			action.ResumeSessionID)
 
 	case loop.ActClaudeExec:
 		return e.runClaude(ctx, task, "exec", ExecPrompt(task.Goal), "")
 
 	case loop.ActClaudeExecResume:
 		return e.runClaude(ctx, task, "exec",
-			ReviseWithFindingsPrompt("the code", action.Findings), action.ResumeSessionID)
+			ReviseWithFindingsPrompt("the code", action.Findings, e.timesRaised(ctx, task.ID)),
+			action.ResumeSessionID)
 
 	case loop.ActVerify:
 		return e.runVerify(ctx, task)
