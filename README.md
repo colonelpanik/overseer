@@ -172,6 +172,13 @@ whatever ceiling you set. It is a `claude` knob — `codex` sends no output
 ceiling on the responses API, so on an `openai` provider it is accepted and
 does nothing. A negative value is refused at load.
 
+**Both keys are newer than the rest of this section**, and a daemon built
+before they existed parses neither. Nothing says so at startup: the config
+loader reports a bad value but not an unrecognised key, so on an older build
+the two are dropped in silence rather than refused. If setting either appears
+to change nothing — the schema still enforced, the replies still truncating —
+suspect the daemon before you suspect the gateway.
+
 `analysis_model` still works and is applied to `roles.analyse.model`.
 
 **Models** on the dashboard shows the roles and providers, lets you repoint a
