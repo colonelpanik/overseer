@@ -106,6 +106,13 @@ providers:
     base_url: https://llm.dc.internal/v1
     key_env: DC_LLM_KEY            # the NAME of a variable, never a key
     models: [qwen3-coder-480b]
+  gateway:                         # an Anthropic-shaped endpoint of your own
+    kind: anthropic
+    base_url: https://llm.dc.internal/anthropic
+    key_env: DC_LLM_KEY
+    models: [claude-sonnet-5]
+    structured_output: false       # default true: the CLI enforces the schema
+    max_output_tokens: 100000      # default 0: leave the CLI's own ceiling
 
 roles:
   code:      {agent: claude, provider: anthropic, model: claude-opus-5}
@@ -131,6 +138,46 @@ one; overseer reads it when it launches an agent and passes it through as that
 CLI's own credential. Nothing lands in the config file, the database, or a log.
 The dashboard shows whether each variable is set, because a missing key would
 otherwise surface as an authentication failure that pauses the whole run.
+
+**A schema is enforced, not suggested.** A turn that has to come back as JSON
+hands its schema to the CLI, which implements it as a constrained tool call: a
+reply of the wrong shape cannot be produced, rather than being caught by a
+parser once the turn is paid for. Through `claude` that covers the reviewer's
+verdict, an analysis's task list, the actions pulled out of a chat, and a
+design's accepted tasks; through `codex`, the verdict alone — the other three
+state their schema in the prompt and lean on the parser, as they always have.
+
+`structured_output: false` turns enforcement off for one provider, leaving
+every schema stated in the prompt instead; absent means true. It belongs to the
+endpoint rather than the role because it is the endpoint that either handles a
+constrained tool call or does not — and one that does not fails whichever of
+those turns run through it, every review round included, while the coding and
+conversational turns carry no schema and keep working. The key is the way out;
+without it the remedy would be to repoint the role at another provider,
+abandoning the endpoint you configured for it. The strict parser is the
+guarantee either way: enforcement makes a malformed reply far less likely, but
+it is still the parser, not the flag, that stands between one and a silent
+approval.
+
+**`max_output_tokens` raises the ceiling on one reply**, and defaults to 0,
+which leaves the CLI's own alone. It is for an Anthropic-shaped gateway that
+ignores the thinking parameter: `claude` asks for `max_tokens: 32000` with
+adaptive thinking, and an endpoint that drops the second lets the model spend
+that whole allowance before it starts answering. The reply then truncates
+mid-stream and arrives as a run of `{` characters, or `[Tool use interrupted]`,
+with the CLI still reporting success — nothing in it says a limit was reached.
+Headroom is the workaround; the gateway honouring the parameter is the fix, and
+unbounded thinking scales with the prompt, so a larger repository will find
+whatever ceiling you set. It is a `claude` knob — `codex` sends no output
+ceiling on the responses API, so on an `openai` provider it is accepted and
+does nothing. A negative value is refused at load.
+
+**Both keys are newer than the rest of this section**, and a daemon built
+before they existed parses neither. Nothing says so at startup: the config
+loader reports a bad value but not an unrecognised key, so on an older build
+the two are dropped in silence rather than refused. If setting either appears
+to change nothing — the schema still enforced, the replies still truncating —
+suspect the daemon before you suspect the gateway.
 
 `analysis_model` still works and is applied to `roles.analyse.model`.
 
